@@ -2,8 +2,6 @@
 
 Copyright © feif.space · Daniel von Lühmann. Alle Rechte vorbehalten, soweit unten nichts anderes steht.
 
-**ENTWURF – vor der Veröffentlichung prüfen lassen.**
-
 1. **Nutzung:** Sie dürfen diese Software kostenlos auf eigenen oder gemieteten Servern betreiben,
    um Geräte mit der App Montix abzugleichen. Das gilt für Ihren Betrieb und für Ihre private
    Nutzung.
