@@ -1,0 +1,21 @@
+# Montix-Server als systemd-Dienst (Beispiel). Pfade, Adresse und Absender anpassen, dann z. B.:
+#   sudo cp montix-abgleich.service.beispiel /etc/systemd/system/montix-abgleich.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now montix-abgleich
+[Unit]
+Description=Montix-Server
+After=network.target
+
+[Service]
+Type=simple
+User=montix
+WorkingDirectory=/opt/montix-server
+Environment=MONTIX_DATEN=/opt/montix-server/daten
+Environment=PORT=8790
+Environment=MONTIX_OEFFENTLICH=https://montix.ihre-firma.de
+Environment="MONTIX_ABSENDER=Montix <montix@ihre-firma.de>"
+ExecStart=/usr/bin/env node --disable-warning=ExperimentalWarning index.mjs
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
