@@ -6,6 +6,10 @@
 //   GET  /nachrichten?seit=<rev>           → { rev, nachrichten[] }      (ohne Aufnahme, nur Kennzeichen)
 //   POST /nachricht {an, text?, audio?, dauerMs?}  → { id, rev }         an = Mitarbeiter-ID oder '*'
 //   GET  /nachricht/<id>/audio             → { daten }                   Base64 der Aufnahme
+//   POST /nachricht/<id>/loeschen          → { ok }                      nur Absender: für alle löschen
+//
+// Gelöschte Nachrichten bleiben als leere Zeile mit neuer rev stehen (geloescht = 1), damit die
+// Geräte der Empfänger sie beim nächsten Abruf ebenfalls entfernen.
 
 import { randomBytes } from 'node:crypto';
 
@@ -20,7 +24,7 @@ export class NachrichtFehler extends Error {
   }
 }
 
-const tabelle = (db) =>
+const tabelle = (db) => {
   db.exec(`
     create table if not exists nachrichten (
       rev integer primary key autoincrement, id text unique not null, von text not null, an text not null,
@@ -28,10 +32,17 @@ const tabelle = (db) =>
     );
     create index if not exists nachrichten_an on nachrichten (an, rev);
   `);
+  try {
+    db.exec('alter table nachrichten add column geloescht integer not null default 0');
+  } catch {
+    // schon vorhanden
+  }
+};
 
 export async function nachrichtenweg(methode, pfad, url, wer, koerper, nachPost = () => {}) {
   const audioId = pfad.match(/^\/nachricht\/([a-z0-9_]+)\/audio$/)?.[1];
-  if (!audioId && !['/kollegen', '/nachrichten', '/nachricht'].includes(pfad)) return undefined;
+  const loeschId = pfad.match(/^\/nachricht\/([a-z0-9_]+)\/loeschen$/)?.[1];
+  if (!audioId && !loeschId && !['/kollegen', '/nachrichten', '/nachricht'].includes(pfad)) return undefined;
   const db = wer.db;
   tabelle(db);
   const ich = wer.mitarbeiter.id;
@@ -39,7 +50,11 @@ export async function nachrichtenweg(methode, pfad, url, wer, koerper, nachPost 
   db.prepare('delete from nachrichten where zeit < ?').run(new Date(Date.now() - AUFBEWAHRUNG_TAGE * 86400000).toISOString());
 
   if (methode === 'GET' && pfad === '/kollegen') {
-    return db.prepare("select id, name, rolle, coalesce(kuerzel, '') as kuerzel, coalesce(farbe, '') as farbe from mitarbeiter where aktiv = 1 and rolle != 'empfaenger' order by name").all();
+    const alle = db.prepare("select id, name, rolle, coalesce(kuerzel, '') as kuerzel, coalesce(farbe, '') as farbe, bereiche from mitarbeiter where aktiv = 1 and rolle != 'empfaenger' order by name").all();
+    // Fremdfahrer und Partnerbetriebe sehen nur die Disposition (Verwalter, Recht „Disposition“), nicht die ganze Belegschaft.
+    const gast = wer.mitarbeiter.rolle === 'fremdfahrer' || wer.mitarbeiter.rolle === 'partner';
+    const dispo = (m) => m.rolle === 'verwalter' || String(m.bereiche ?? '').includes('recht:dispo');
+    return alle.filter((m) => !gast || dispo(m)).map(({ bereiche: _b, ...m }) => m);
   }
 
   if (methode === 'GET' && pfad === '/nachrichten') {
@@ -61,6 +76,7 @@ export async function nachrichtenweg(methode, pfad, url, wer, koerper, nachPost 
         audio: !!z.audio,
         dauerMs: z.dauer_ms ?? 0,
         zeit: z.zeit,
+        ...(z.geloescht ? { geloescht: true } : {}),
       })),
     };
   }
@@ -88,6 +104,22 @@ export async function nachrichtenweg(methode, pfad, url, wer, koerper, nachPost 
     const z = db.prepare("select audio from nachrichten where id = ? and (an = '*' or an = ? or von = ?)").get(audioId, ich, ich);
     if (!z?.audio) throw new NachrichtFehler(404, 'Keine Aufnahme');
     return { daten: z.audio };
+  }
+
+  if (methode === 'POST' && loeschId) {
+    const z = db.prepare('select * from nachrichten where id = ? and geloescht = 0').get(loeschId);
+    if (!z) return { ok: true };
+    if (z.von !== ich) throw new NachrichtFehler(403, 'Löschen kann nur, wer die Nachricht geschickt hat.');
+    db.exec('begin immediate');
+    try {
+      db.prepare('delete from nachrichten where id = ?').run(loeschId);
+      db.prepare('insert into nachrichten (id, von, an, zeit, geloescht) values (?, ?, ?, ?, 1)').run(z.id, z.von, z.an, z.zeit);
+      db.exec('commit');
+    } catch (e) {
+      db.exec('rollback');
+      throw e;
+    }
+    return { ok: true };
   }
 
   throw new NachrichtFehler(404, 'Unbekannter Weg');

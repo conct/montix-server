@@ -6,6 +6,7 @@
 //   GET  /abgleich?seit=<rev>       → { rev, mehr, aenderungen[] }
 //   POST /abgleich {aenderungen[]}  → { rev, uebernommen, verworfen[] }
 //   POST /nummer {beleg, art, jahr} → { nummer }                          (idempotent je Beleg)
+//   POST /ausweis {kennung}         → { mitarbeiter: {id, name} }         (NFC-Ausweis; gesperrt → 403)
 //   Nur Verwalter:
 //   GET  /mitarbeiter               → [{ id, name, rolle, aktiv, geraete[] }]
 //   POST /einladung {name, rolle}   → { code, gueltigBis }
@@ -14,6 +15,7 @@
 //   POST /mitarbeiter/rechte {id, bereiche: string[] | null}   (null = alle Bereiche)
 //   GET  /export                    → gesamter Bestand des Betriebs als JSON
 //   POST /vertrag {fassung}         → Zustimmung zum Vertrag zur Auftragsverarbeitung festhalten
+//   /kasse/*                        → Barkasse mit TSE (buchbares Modul) — siehe kasse.mjs
 //
 // Mit MONTIX_VERTRAG=pflicht (zentraler Betrieb) gehen Abgleich und Nummern erst, wenn ein
 // Verwalter dem Vertrag zur Auftragsverarbeitung zugestimmt hat. Beim eigenen Server entfällt das.
@@ -32,8 +34,13 @@ import { alarmZiele, erstelleExpoPush, nachricht as pushNachricht, pushWeg, toke
 import { erstelleMail, MailFehler, pythonHelfer } from './mail.mjs';
 import { NachrichtFehler, nachrichtenweg } from './nachrichten.mjs';
 import { erstelleZahlung, ZahlFehler } from './zahlung.mjs';
+import { erstelleKasse, hatRecht, KassenDatei, KassenFehler } from './kasse.mjs';
 import { fehlerMelden } from './fehler.mjs';
 import { erstelleAdresssuche } from './adresse.mjs';
+import { darfDispo, erstelleOrtung, fuerFremdfahrer, sendungSeite, TourFehler, tourenWeg } from './touren.mjs';
+import { sendungMail } from './mailvorlage.mjs';
+import { karteWeg } from './karte.mjs';
+import { erstellePartner, PartnerFehler } from './partner.mjs';
 // Abo und Postfach nur auf dem zentralen Server; im öffentlichen Paket leere Fassungen — siehe anbieter.mjs.
 import { betriebUuid, erstelleAbos, erstellePostfach, KaufFehler } from './anbieter.mjs';
 import { aufraeumen as termineAufraeumen, erinnerungenVerschicken, TerminFehler, terminOeffentlich, terminWeg } from './terminmitteilung.mjs';
@@ -53,7 +60,7 @@ function antwort(res, status, daten) {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     'access-control-allow-origin': '*',
-    'access-control-allow-headers': 'authorization, content-type',
+    'access-control-allow-headers': 'authorization, content-type, range',
     'access-control-allow-methods': 'GET, POST, OPTIONS',
   });
   res.end(status === 204 ? undefined : JSON.stringify(daten));
@@ -95,11 +102,42 @@ function pruefeAenderungen(liste) {
  */
 const FIRMA_ROH = ['firma', 'logo', 'farben'];
 
-export function erlaubte(liste, mitarbeiter) {
+/**
+ * Warenwirtschaft (src/features/abgleich/rechte.ts): Lieferanten pflegt, wer „Einkauf“ darf
+ * (Verwalter immer). Bestellungen ändert außerdem, wer Lager buchen darf — der Wareneingang hält
+ * die gelieferten Mengen an der Bestellung fest. „Lager buchen“ hat auch, wer alle Bereiche hat.
+ */
+export const RECHT_EINKAUF = 'recht:einkauf';
+export const RECHT_LAGER = 'recht:lager';
+const darfEinkauf = (m) => m.rolle === 'verwalter' || hatRecht(m, RECHT_EINKAUF);
+const darfLager = (m) => m.rolle === 'verwalter' || m.bereiche === null || m.bereiche === undefined || hatRecht(m, RECHT_LAGER);
+
+export function erlaubte(liste, mitarbeiter, db) {
+  const etikettVorher = db ? db.prepare("select inhalt from daten where sammlung = 'etiketten' and id = ? and geloescht = 0") : null;
   return liste.filter((a) => {
+    // Etikettenregister: Ausweiskarten (Kennung → Mitarbeiter) ordnet nur ein Verwalter zu, sperrt
+    // oder löscht sie. Ein Mitarbeiter darf eine Ausweiskarte auch nicht zu etwas anderem umdeuten.
+    if (a.sammlung === 'etiketten') {
+      if (mitarbeiter.rolle === 'verwalter') return true;
+      if (!a.geloescht && a.inhalt?.art === 'ausweis') return false;
+      const vorher = etikettVorher?.get(a.id);
+      return !vorher || JSON.parse(vorher.inhalt)?.art !== 'ausweis';
+    }
     if (a.sammlung === 'schritte') return a.id.startsWith(`${mitarbeiter.id}_`) && (a.geloescht || a.inhalt.mitarbeiter === mitarbeiter.id);
     if (a.sammlung === 'aktionen') return mitarbeiter.rolle === 'verwalter';
-    // Firmendaten, Logo und Firmenfarben ändert nur ein Verwalter — sonst trüge ein Monteur einen
+    // Fremdfahrer schreiben nur Ereignisse ihrer eigenen Touren, sonst nichts.
+    // Eigene Meldungen darf man zurücknehmen (Grabstein): geprüft am gespeicherten Absender.
+    const eigeneMeldung = () => (a.geloescht ? (() => {
+      const z = db?.prepare("select inhalt from daten where sammlung = 'tourereignisse' and id = ?").get(a.id);
+      return !z || JSON.parse(z.inhalt)?.von === mitarbeiter.id;
+    })() : a.inhalt?.von === mitarbeiter.id);
+    if (mitarbeiter.rolle === 'fremdfahrer' || mitarbeiter.rolle === 'partner') return a.sammlung === 'dateien' || (a.sammlung === 'tourereignisse' && eigeneMeldung());
+    // Touren plant die Disposition (Verwalter oder Recht „Disposition“); Fahrer melden nur Ereignisse.
+    if (a.sammlung === 'touren') return darfDispo(mitarbeiter);
+    if (a.sammlung === 'tourereignisse') return darfDispo(mitarbeiter) || eigeneMeldung();
+    if (a.sammlung === 'lieferanten') return darfEinkauf(mitarbeiter);
+    if (a.sammlung === 'bestellungen') return darfEinkauf(mitarbeiter) || darfLager(mitarbeiter);
+    // Firmendaten, Logo und Firmenfarben ändert nur ein Verwalter — sonst trüge ein Mitarbeiter einen
     // anderen Absender auf allen Geräten des Betriebs ein.
     if (a.sammlung === 'roh' && FIRMA_ROH.includes(a.id)) return mitarbeiter.rolle === 'verwalter';
     return true;
@@ -135,6 +173,11 @@ export function erstelleDienst(
     aboHolen = fetch,
     // Mail-Client je Mitarbeiter (IMAP/SMTP über mail-helfer.py); in Tests ein Fänger.
     mailHelfer = pythonHelfer,
+    // Barkasse: TSE_* als Vorgabe auf einem eigenen Server; in Tests ein Fänger statt https zu fiskaly.
+    tseUmgebung = process.env,
+    tseAnfrage,
+    // Partner-Weiterleitung zu anderen Servern (Touren); in Tests ein Fänger statt fetch.
+    fernHolen = fetch,
   } = {},
 ) {
   const zahlungsweg = erstelleZahlung(speicher.speicherOrt ?? ordner);
@@ -155,6 +198,7 @@ export function erstelleDienst(
     if (abo?.aktiv) return abo;
     return postfach.betriebStand(id) ?? abo;
   };
+  const kasse = erstelleKasse({ ordner: speicher.speicherOrt ?? ordner, zentral: vertragPflicht, betriebStand, umgebung: tseUmgebung, anfrage: tseAnfrage });
   /** Push an Kollegen und Empfänger, wenn bei einer Person Alarm ist oder sie sich wieder meldet. */
   const alarmPush = (db, a, entwarnung = false) => {
     const ziele = tokensVon(db, alarmZiele(db, a.mitarbeiter));
@@ -184,6 +228,9 @@ export function erstelleDienst(
   const testZaehler = new Map();
   const adressZaehler = new Map();
   const adresseSuchen = erstelleAdresssuche({ holen: adresseHolen });
+  // Touren: Orte der Stopps (Photon) und Fahrzeiten (openrouteservice, wenn MONTIX_ORS_KEY gesetzt).
+  const ortung = erstelleOrtung({ holen: adresseHolen });
+  const partner = erstellePartner({ speicher, holen: fernHolen });
   const server = createServer(async (req, res) => {
     try {
       if (req.method === 'OPTIONS') return antwort(res, 204);
@@ -193,6 +240,22 @@ export function erstelleDienst(
 
       if (req.method === 'GET' && pfad === '/status') return antwort(res, 200, { dienst: 'montix-abgleich', version: VERSION });
 
+      // Wer die Adresse im Browser aufruft: Bei uns (zentral) geht es auf die Produktseite; ein
+      // eigener Server eines Betriebs zeigt nur einen kurzen Hinweis, wofür die Adresse da ist.
+      if ((req.method === 'GET' || req.method === 'HEAD') && (pfad === '/' || pfad === '/montix' || pfad === '/montix/')) {
+        if (vertragPflicht) {
+          res.writeHead(302, { location: process.env.MONTIX_STARTSEITE ?? 'https://feif.space/apps-software/montix/', 'cache-control': 'no-store' });
+          return res.end();
+        }
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
+        return res.end(
+          '<!doctype html><html lang="de"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Montix-Server</title>' +
+            '<body style="font:17px/1.5 system-ui,sans-serif;max-width:34em;margin:3em auto;padding:0 16px">' +
+            '<h1 style="font-size:1.4em">Montix-Server</h1><p>Hier läuft der Abgleich für die Geräte eines Betriebs. Diese Adresse trägt man in der App unter „Einstellungen → Abgleich mit dem Betrieb“ als eigenen Server ein; im Browser gibt es hier nichts zu sehen.</p>' +
+            '<p><a href="https://feif.space/apps-software/montix/">Mehr über Montix</a></p></body></html>',
+        );
+      }
+
       if (req.method === 'POST' && pfad === '/anmelden') {
         const { code, geraet } = await koerper(req);
         const ok = speicher.anmelden(code, geraet);
@@ -200,12 +263,23 @@ export function erstelleDienst(
         return antwort(res, 200, ok);
       }
 
-      // Öffentliche Seite für den Kunden: wie weit der Monteur ungefähr noch entfernt ist.
+      // Öffentliche Seite für den Kunden: wie weit der Mitarbeiter ungefähr noch entfernt ist.
       const weg = pfad.match(/^\/weg\/([A-Za-z0-9_-]+)$/);
       if (req.method === 'GET' && weg) {
         const html = wegSeite(speicher, weg[1]);
         res.writeHead(html ? 200 : 404, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
         return res.end(html ?? '<!doctype html><meta charset="utf-8"><p>Diese Fahrt gibt es nicht (mehr).</p>');
+      }
+
+      // Karten selbst ausgeliefert (Bibliotheken und Kacheln) — siehe karte.mjs.
+      if (karteWeg(req, res, pfad)) return;
+
+      // Touren: öffentliche Seite für den Empfänger einer Lieferung — siehe touren.mjs.
+      const sendung = pfad.match(/^\/sendung\/([A-Za-z0-9_-]+)$/);
+      if (req.method === 'GET' && sendung) {
+        const html = await sendungSeite(speicher, ortung, sendung[1]);
+        res.writeHead(html ? 200 : 404, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
+        return res.end(html ?? '<!doctype html><meta charset="utf-8"><p>Diese Sendung gibt es nicht (mehr).</p>');
       }
 
       // Terminmitteilung: Kunde bestätigt oder lehnt ab — siehe terminmitteilung.mjs.
@@ -337,6 +411,9 @@ export function erstelleDienst(
           kaufkennung: betriebUuid(wer.betrieb.id),
           pruefschluessel: speicher.oeffentlicherSchluessel,
           rechte: speicher.signierteRechte(wer.betrieb.id, wer.roh),
+          // Buchbare Module: ob die Barkasse für diesen Betrieb freigeschaltet ist (sonst mit Grund).
+          // Barkasse: Betrieb freigeschaltet, ist DIESES Gerät eine Kasse, darf die Person kassieren.
+          module: { kasse: kasse.status(wer, hash(token).slice(0, 12)) },
         });
       }
 
@@ -349,7 +426,7 @@ export function erstelleDienst(
 
       // Löschen aus der App (Play: Kontolöschung in der App).
       //   art 'geraet'  → nur dieses Gerät abmelden
-      //   art 'person'  → die eigene Person (Empfänger, Monteur, Privatkonto: dann der ganze Privat-„Betrieb“)
+      //   art 'person'  → die eigene Person (Empfänger, Mitarbeiter, Privatkonto: dann der ganze Privat-„Betrieb“)
       //   art 'betrieb' → ganzer Betrieb, nur Verwalter, mit Namen zur Bestätigung
       if (req.method === 'POST' && pfad === '/konto/loeschen') {
         const { art, bestaetigung } = await koerper(req);
@@ -387,6 +464,12 @@ export function erstelleDienst(
         throw new Fehler(403, empfaenger ? 'Dieses Gerät empfängt nur Alarme der Alleinarbeit.' : 'Dieses Konto ist nur für die Alleinarbeit.');
       }
       if (empfaenger && pfad.startsWith('/empfaenger')) throw new Fehler(403, 'Nur für die Person selbst');
+      // Fremdfahrer (Subunternehmer, ohne eigene Lizenz): nur Touren, Abgleich (gefiltert), Nachrichten, Push.
+      // Partnerbetriebe (Rolle 'partner', Verbund Server zu Server) genauso, dazu /ich für die Prüfung.
+      const gastRolle = wer.mitarbeiter.rolle === 'fremdfahrer' || wer.mitarbeiter.rolle === 'partner';
+      if (gastRolle && !(pfad === '/abgleich' || pfad === '/ich' || pfad.startsWith('/touren/') || pfad === '/touren' || pfad.startsWith('/push/') || pfad.startsWith('/nachricht') || pfad === '/kollegen')) {
+        throw new Fehler(403, 'Fremdfahrer sehen nur ihre Touren.');
+      }
 
       // Empfänger für die eigene Person auflisten und entfernen (Einladen: unten, nach der AVV-Prüfung).
       if (pfad === '/empfaenger' && req.method === 'GET') return antwort(res, 200, speicher.empfaengerListe(wer.db, wer.mitarbeiter.id));
@@ -407,10 +490,30 @@ export function erstelleDienst(
 
       // Auch Einladungen erst nach Zustimmung: Sonst könnte ein Betrieb Geräte anmelden und
       // (etwa über die Alleinarbeit, die bewusst ausgenommen ist) Daten verarbeiten, ohne je zuzustimmen.
-      const datenweg = pfad === '/abgleich' || pfad.startsWith('/mail/') || pfad === '/nummer' || pfad.startsWith('/nachricht') || pfad === '/kollegen' || pfad === '/einladung' || pfad === '/empfaenger/einladung' || pfad.startsWith('/freigabe') || pfad === '/raeume' || pfad === '/raum' || pfad.startsWith('/raum/') || pfad.startsWith('/termin/');
+      const datenweg = pfad === '/abgleich' || pfad === '/ausweis' || pfad.startsWith('/mail/') || pfad === '/nummer' || pfad.startsWith('/nachricht') || pfad === '/kollegen' || pfad === '/einladung' || pfad === '/empfaenger/einladung' || pfad.startsWith('/freigabe') || pfad === '/raeume' || pfad === '/raum' || pfad.startsWith('/raum/') || pfad.startsWith('/termin/') || (pfad.startsWith('/kasse/') && pfad !== '/kasse/status');
       // Privatkonten sind keine Betriebe — dort gibt es keine Auftragsverarbeitung, also keinen AVV.
       if (vertragPflicht && datenweg && wer.betrieb.art !== 'privat' && vertrag?.fassung !== VERTRAG_FASSUNG) {
         throw new Fehler(451, 'Der Betrieb hat dem Vertrag zur Auftragsverarbeitung noch nicht zugestimmt. Ein Verwalter erledigt das unter Einstellungen → Abgleich.');
+      }
+
+      // Barkasse mit TSE (buchbares Modul) — siehe kasse.mjs.
+      try {
+        const k = await kasse.weg(req.method, pfad, url, wer, () => koerper(req), hash(token).slice(0, 12));
+        if (k instanceof KassenDatei) {
+          res.writeHead(200, {
+            'content-type': k.typ,
+            'content-length': k.daten.length,
+            'content-disposition': `attachment; filename="${k.name}"`,
+            'cache-control': 'no-store',
+            'access-control-allow-origin': '*',
+            'access-control-expose-headers': 'content-disposition',
+          });
+          return res.end(k.daten);
+        }
+        if (k !== undefined) return antwort(res, 200, k);
+      } catch (e) {
+        if (e instanceof KassenFehler) throw new Fehler(e.status, e.message);
+        throw e;
       }
 
       // Alleinarbeit (Totmannschalter) — siehe alleinarbeit.mjs. Arbeitsschutz: läuft auch ohne
@@ -441,6 +544,47 @@ export function erstelleDienst(
         if (u !== undefined) return antwort(res, 200, u);
       } catch (e) {
         if (e instanceof WegFehler) throw new Fehler(e.status, e.message);
+        throw e;
+      }
+
+      // „Andere Firmen“: Fremdfahrer und Partnerbetriebe einladen, auflisten, sperren — auch für die
+      // Disposition (in einer Spedition laden Disponenten die Subunternehmer ein), aber nur diese Rollen.
+      if (pfad === '/touren/gaeste' || pfad === '/touren/einladung' || pfad === '/touren/gast/aktiv') {
+        if (!darfDispo({ ...wer.mitarbeiter, bereiche: wer.roh?.bereiche ?? null })) throw new Fehler(403, 'Nur für Verwalter und Disposition');
+        if (req.method === 'GET' && pfad === '/touren/gaeste') return antwort(res, 200, speicher.gaesteListe(wer.db));
+        if (req.method === 'POST' && pfad === '/touren/einladung') {
+          const { name, rolle, id } = await koerper(req);
+          if (!['fremdfahrer', 'partner'].includes(rolle)) throw new Fehler(400, 'Rolle ist fremdfahrer oder partner');
+          // Neuer Code für einen schon eingeladenen Gast: über seinen Namen (einladen() findet ihn).
+          const vorhanden = id ? speicher.gaesteListe(wer.db).find((g) => g.id === id) : null;
+          const n = vorhanden?.name ?? (typeof name === 'string' ? name.trim() : '');
+          if (!n || n.length > 80) throw new Fehler(400, 'Name fehlt');
+          const e = speicher.einladen(wer.betrieb.id, n, vorhanden?.rolle ?? rolle);
+          return antwort(res, 200, { code: e.code, gueltigBis: e.gueltigBis, id: e.mitarbeiter });
+        }
+        if (req.method === 'POST' && pfad === '/touren/gast/aktiv') {
+          const { id, aktiv } = await koerper(req);
+          if (!speicher.gaesteListe(wer.db).some((g) => g.id === id)) throw new Fehler(404, 'Unbekannt');
+          speicher.mitarbeiterAktiv(wer.db, id, !!aktiv);
+          return antwort(res, 200, { ok: true });
+        }
+      }
+
+      // Touren an Partnerbetriebe übernehmen (Verbund Server zu Server) — siehe partner.mjs.
+      try {
+        const pw = await partner.weg(req.method, pfad, wer, () => koerper(req));
+        if (pw !== undefined) return antwort(res, 200, pw);
+      } catch (e) {
+        if (e instanceof PartnerFehler) throw new Fehler(e.status, e.message);
+        throw e;
+      }
+
+      // Touren für Speditionen — siehe touren.mjs.
+      try {
+        const tw = await tourenWeg(req.method, pfad, url, wer, () => koerper(req), basisVon(req), senden, ortung, sendungMail);
+        if (tw !== undefined) return antwort(res, 200, tw);
+      } catch (e) {
+        if (e instanceof TourFehler) throw new Fehler(e.status, e.message);
         throw e;
       }
 
@@ -504,17 +648,33 @@ export function erstelleDienst(
       if (req.method === 'GET' && pfad === '/abgleich') {
         const seit = Number(url.searchParams.get('seit') ?? 0);
         if (!Number.isInteger(seit) || seit < 0) throw new Fehler(400, 'seit muss eine Zahl sein');
-        return antwort(res, 200, speicher.lesen(wer.db, seit));
+        const gelesen = speicher.lesen(wer.db, seit);
+        return antwort(res, 200, wer.mitarbeiter.rolle === 'fremdfahrer' || wer.mitarbeiter.rolle === 'partner' ? fuerFremdfahrer(gelesen, wer.mitarbeiter.id, wer.db) : gelesen);
       }
 
       if (req.method === 'POST' && pfad === '/abgleich') {
         const { aenderungen } = await koerper(req);
-        return antwort(res, 200, speicher.schreiben(wer.db, wer.mitarbeiter.id, erlaubte(pruefeAenderungen(aenderungen), wer.mitarbeiter)));
+        // Mit den Freigaben der Person (bereiche), für die Rechte der Warenwirtschaft.
+        const person = { ...wer.mitarbeiter, bereiche: wer.roh?.bereiche ?? null };
+        return antwort(res, 200, speicher.schreiben(wer.db, wer.mitarbeiter.id, erlaubte(pruefeAenderungen(aenderungen), person, wer.db)));
+      }
+
+      // Mitarbeiterausweis am geteilten Gerät: Karte → Person. Gesperrte Karten und Personen lehnt
+      // der Server ab; das Gerät fragt hier, wenn es Netz hat, sonst gilt sein abgeglichenes Register.
+      if (req.method === 'POST' && pfad === '/ausweis') {
+        const { kennung } = await koerper(req);
+        const r = speicher.ausweis(wer.db, kennung);
+        if (r === 'unbekannt') throw new Fehler(404, 'Diese Karte ist keinem Mitarbeiter zugeordnet.');
+        if (r === 'gesperrt') throw new Fehler(403, 'Diese Karte ist gesperrt.');
+        if (r === 'inaktiv') throw new Fehler(403, 'Diese Person ist im Betrieb gesperrt.');
+        return antwort(res, 200, { mitarbeiter: r });
       }
 
       if (req.method === 'POST' && pfad === '/nummer') {
         const { beleg, art, jahr, mindestens } = await koerper(req);
         if (typeof beleg !== 'string' || !beleg) throw new Fehler(400, 'beleg fehlt');
+        // Kassenbelege bekommen ihre Nummer nur zusammen mit dem Beleg (kasse.mjs) — sonst entstünden Lücken.
+        if (String(art).startsWith('kassenbeleg')) throw new Fehler(400, 'Kassenbelege werden über /kasse/beleg nummeriert');
         if (Number.isInteger(mindestens) && mindestens > 0) speicher.nummernMindestens(wer.db, art, jahr, mindestens);
         try {
           return antwort(res, 200, { nummer: speicher.nummer(wer.db, beleg, art, jahr) });
@@ -531,7 +691,7 @@ export function erstelleDienst(
           const { name, rolle } = await koerper(req);
           if (typeof name !== 'string' || !name.trim() || name.length > 80) throw new Fehler(400, 'Name fehlt');
           try {
-            const e = speicher.einladen(wer.betrieb.id, name.trim(), rolle ?? 'monteur');
+            const e = speicher.einladen(wer.betrieb.id, name.trim(), rolle ?? 'mitarbeiter');
             return antwort(res, 200, { code: e.code, gueltigBis: e.gueltigBis });
           } catch (e) {
             throw new Fehler(400, e.message);
@@ -547,14 +707,14 @@ export function erstelleDienst(
           const d = await koerper(req);
           const r = speicher.mitarbeiterDaten(wer.db, d.id, d);
           if (r === 'unbekannt') throw new Fehler(404, 'Unbekannter Mitarbeiter');
-          if (r === 'letzter') throw new Fehler(400, 'Der letzte Verwalter kann nicht Monteur werden — erst einen anderen zum Verwalter machen.');
+          if (r === 'letzter') throw new Fehler(400, 'Der letzte Verwalter kann nicht Mitarbeiter werden — erst einen anderen zum Verwalter machen.');
           return antwort(res, 200, { ok: true });
         }
         if (req.method === 'POST' && pfad === '/mitarbeiter/rechte') {
           const { id, bereiche } = await koerper(req);
           const ok =
             bereiche === null ||
-            (Array.isArray(bereiche) && bereiche.length <= 60 && bereiche.every((b) => typeof b === 'string' && /^[a-z0-9_-]{1,40}$/i.test(b)));
+            (Array.isArray(bereiche) && bereiche.length <= 60 && bereiche.every((b) => typeof b === 'string' && /^(recht:)?[a-z0-9_-]{1,40}$/i.test(b)));
           if (!ok) throw new Fehler(400, 'bereiche ist eine Liste von Bereichskennungen oder null');
           if (!speicher.rechteSetzen(wer.db, id, bereiche)) throw new Fehler(404, 'Unbekannter Mitarbeiter');
           return antwort(res, 200, { ok: true });
@@ -616,6 +776,7 @@ export function erstelleDienst(
     const t = setInterval(() => {
       pruefeAlarme();
       postVerschicken();
+      void partner.weiterleiten();
       termineErinnern();
       if (++minuten % 60 === 0) {
         aufraeumen();
@@ -626,6 +787,7 @@ export function erstelleDienst(
     server.on('close', () => clearInterval(t));
   }
   server.pruefeAlarme = pruefeAlarme;
+  server.partnerWeiterleiten = partner.weiterleiten;
   server.aufraeumen = aufraeumen;
   server.postVerschicken = postVerschicken;
   server.termineErinnern = termineErinnern;

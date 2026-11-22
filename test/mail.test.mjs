@@ -39,8 +39,8 @@ async function geraet(name, rolle) {
 const KONTO = { name: 'Anna Muster', adresse: 'anna@muster.de', imapHost: 'imap.muster.de', imapPort: 993, smtpHost: 'smtp.muster.de', smtpPort: 465, passwort: 'geheim123' };
 
 test('Postfach je Mitarbeiter: einrichten, Passwort nie zurück, anderer sieht es nicht', async () => {
-  const a = await geraet('Anna', 'monteur');
-  const b = await geraet('Bernd', 'monteur');
+  const a = await geraet('Anna', 'mitarbeiter');
+  const b = await geraet('Bernd', 'mitarbeiter');
   assert.deepEqual((await rufe('/mail/konto', { token: a.token })).daten, { eingerichtet: false });
 
   antwortVon = () => ({ ok: true, ordner: [{ pfad: 'INBOX', name: 'Posteingang', rolle: 'eingang' }] });
@@ -82,7 +82,7 @@ test('Postfach je Mitarbeiter: einrichten, Passwort nie zurück, anderer sieht e
 });
 
 test('Eingaben: nur Mail-Ports, gültige Adressen, Passwort nötig', async () => {
-  const a = await geraet('Clara', 'monteur');
+  const a = await geraet('Clara', 'mitarbeiter');
   antwortVon = () => ({ ok: true, ordner: [] });
   assert.equal((await rufe('/mail/konto', { token: a.token, body: { ...KONTO, imapPort: 8790 } })).status, 400);
   assert.equal((await rufe('/mail/konto', { token: a.token, body: { ...KONTO, imapHost: '127.0.0.1:22' } })).status, 400);

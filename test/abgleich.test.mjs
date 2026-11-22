@@ -63,7 +63,7 @@ test('Einladungscode gilt genau einmal', async () => {
 
 test('Zwei Geräte gleichen ab; jüngere Änderung gewinnt; Löschen kommt an', async () => {
   const a = await geraet('Anna', 'verwalter');
-  const b = await geraet('Bernd', 'monteur');
+  const b = await geraet('Bernd', 'mitarbeiter');
   assert.equal(a.mitarbeiter.rolle, 'verwalter');
   assert.equal(b.betrieb.name, 'Muster GmbH');
 
@@ -125,10 +125,10 @@ test('Abholen in Seiten', async () => {
 
 test('Verwalter lädt ein, sperrt und entfernt Geräte; Monteur darf das nicht', async () => {
   const chef = await geraet('Gisela', 'verwalter');
-  const monteur = await geraet('Hans', 'monteur');
+  const monteur = await geraet('Hans', 'mitarbeiter');
   assert.equal((await rufe('/mitarbeiter', { token: monteur.token })).status, 403);
 
-  const e = await rufe('/einladung', { token: chef.token, body: { name: 'Ida', rolle: 'monteur' } });
+  const e = await rufe('/einladung', { token: chef.token, body: { name: 'Ida', rolle: 'mitarbeiter' } });
   assert.equal(e.status, 200);
   const ida = (await rufe('/anmelden', { body: { code: e.daten.code, geraet: 'Handy Ida' } })).daten;
   assert.equal(ida.mitarbeiter.name, 'Ida');
@@ -168,7 +168,7 @@ test('Vertrag zur Auftragsverarbeitung: Pflicht im zentralen Betrieb, Export, Be
     return (await r.json()).token;
   };
   const chef = await an('Chefin', 'verwalter');
-  const monteur = await an('Monteur', 'monteur');
+  const monteur = await an('Monteur', 'mitarbeiter');
 
   const ich = (await ruf('/ich', chef)).daten;
   assert.equal(ich.vertrag.pflicht, true);
@@ -194,7 +194,7 @@ test('Vertrag zur Auftragsverarbeitung: Pflicht im zentralen Betrieb, Export, Be
 
 test('Rechte: Verwalter gibt Bereiche frei, Gerät bekommt sie signiert', async () => {
   const chef = await geraet('Jana', 'verwalter');
-  const monteur = await geraet('Kai', 'monteur');
+  const monteur = await geraet('Kai', 'mitarbeiter');
   const liste = (await rufe('/mitarbeiter', { token: chef.token })).daten;
   const kai = liste.find((m) => m.name === 'Kai');
   assert.equal(kai.bereiche, null);
@@ -206,7 +206,7 @@ test('Rechte: Verwalter gibt Bereiche frei, Gerät bekommt sie signiert', async 
   const ich = (await rufe('/ich', { token: monteur.token })).daten;
   const inhalt = JSON.parse(ich.rechte.text);
   assert.deepEqual(inhalt.bereiche, ['calendar', 'report']);
-  assert.equal(inhalt.rolle, 'monteur');
+  assert.equal(inhalt.rolle, 'mitarbeiter');
 
   // Signatur mit dem öffentlichen Schlüssel aus der Anmeldung prüfen (Rohform → SPKI).
   const roh = Buffer.from(monteur.pruefschluessel, 'base64');
@@ -234,7 +234,7 @@ test('Kartenzahlung: Verwalter hinterlegt Stripe-Schlüssel, Gerät holt Token u
   };
   try {
     const chef = await geraet('Lena', 'verwalter');
-    const monteur = await geraet('Moritz', 'monteur');
+    const monteur = await geraet('Moritz', 'mitarbeiter');
     assert.equal((await rufe('/zahlung/status', { token: monteur.token })).daten.stripe, false);
     assert.equal((await rufe('/terminal/token', { token: monteur.token, body: {} })).status, 503);
     assert.equal((await rufe('/zahlung/stripe', { token: monteur.token, body: { schluessel: 'rk_test_gut1234567890' } })).status, 403);
@@ -258,8 +258,8 @@ test('Kartenzahlung: Verwalter hinterlegt Stripe-Schlüssel, Gerät holt Token u
 
 test('Nachrichten: an alle und an eine Person, nur Beteiligte sehen sie, Sprachnachricht auf Abruf', async () => {
   const nina = await geraet('Nina', 'verwalter');
-  const otto = await geraet('Otto', 'monteur');
-  const paul = await geraet('Paul', 'monteur');
+  const otto = await geraet('Otto', 'mitarbeiter');
+  const paul = await geraet('Paul', 'mitarbeiter');
   const kollegen = (await rufe('/kollegen', { token: otto.token })).daten;
   assert.ok(kollegen.some((k) => k.name === 'Nina'));
 
@@ -280,6 +280,13 @@ test('Nachrichten: an alle und an eine Person, nur Beteiligte sehen sie, Sprachn
   assert.equal((await rufe(`/nachricht/${privat.id}/audio`, { token: paul.token })).status, 404);
   // Abholmarke: danach nur Neues
   assert.equal((await rufe(`/nachrichten?seit=${beiOtto.rev}`, { token: otto.token })).daten.nachrichten.length, 0);
+  // Löschen: nur der Absender, danach erfährt Ottos Gerät davon; die Aufnahme ist weg.
+  assert.equal((await rufe(`/nachricht/${privat.id}/loeschen`, { token: otto.token, body: {} })).status, 403);
+  assert.equal((await rufe(`/nachricht/${privat.id}/loeschen`, { token: nina.token, body: {} })).status, 200);
+  const neu = (await rufe(`/nachrichten?seit=${beiOtto.rev}`, { token: otto.token })).daten.nachrichten;
+  assert.deepEqual(neu.map((m) => [m.id, m.geloescht, m.text, m.audio]), [[privat.id, true, '', false]]);
+  assert.equal((await rufe(`/nachricht/${privat.id}/audio`, { token: otto.token })).status, 404);
+  assert.equal((await rufe(`/nachricht/${privat.id}/loeschen`, { token: nina.token, body: {} })).status, 200);
   // Nach 90 Tagen ist eine Nachricht weg (Zeitpunkt künstlich zurückgesetzt).
   const db = speicher.pruefe(otto.token).db;
   db.prepare('update nachrichten set zeit = ? where id = ?').run(new Date(Date.now() - 91 * 86400000).toISOString(), privat.id);
@@ -289,7 +296,7 @@ test('Nachrichten: an alle und an eine Person, nur Beteiligte sehen sie, Sprachn
 
 test('Mitarbeiterdaten: Verwalter pflegt Stammdaten und Rolle, letzter Verwalter bleibt', async () => {
   const chef = await geraet('Rita', 'verwalter');
-  const ma = await geraet('Sven', 'monteur');
+  const ma = await geraet('Sven', 'mitarbeiter');
   const liste = (await rufe('/mitarbeiter', { token: chef.token })).daten;
   const sven = liste.find((m) => m.name === 'Sven');
   assert.equal((await rufe('/mitarbeiter/daten', { token: ma.token, body: { id: sven.id, kuerzel: 'SV' } })).status, 403);
@@ -304,12 +311,12 @@ test('Mitarbeiterdaten: Verwalter pflegt Stammdaten und Rolle, letzter Verwalter
   assert.equal((await rufe('/mitarbeiter', { token: chef.token })).daten.find((m) => m.id === sven.id).farbe, '#2f855a');
   // Sven wird Verwalter, Rita darf danach Monteur werden.
   await rufe('/mitarbeiter/daten', { token: chef.token, body: { id: sven.id, rolle: 'verwalter' } });
-  assert.equal((await rufe('/mitarbeiter/daten', { token: chef.token, body: { id: chef.mitarbeiter.id, rolle: 'monteur' } })).status, 200);
+  assert.equal((await rufe('/mitarbeiter/daten', { token: chef.token, body: { id: chef.mitarbeiter.id, rolle: 'mitarbeiter' } })).status, 200);
 });
 
 test('Bewegung: Schritte nur für sich selbst, Aktionen nur vom Verwalter', async () => {
   const chef = await geraet('Bea', 'verwalter');
-  const ma = await geraet('Tom', 'monteur');
+  const ma = await geraet('Tom', 'mitarbeiter');
   const eigen = { sammlung: 'schritte', id: `${ma.mitarbeiter.id}_2026-11-13`, geaendert: t(1), inhalt: { mitarbeiter: ma.mitarbeiter.id, datum: '2026-11-13', schritte: 8000 } };
   const fremd = { sammlung: 'schritte', id: `${chef.mitarbeiter.id}_2026-11-13`, geaendert: t(1), inhalt: { mitarbeiter: chef.mitarbeiter.id, datum: '2026-11-13', schritte: 99999 } };
   const aktionMa = { sammlung: 'aktionen', id: 'a-ma', geaendert: t(1), inhalt: { titel: 'selbst ausgedacht' } };
@@ -331,8 +338,8 @@ test('Bewegung: Schritte nur für sich selbst, Aktionen nur vom Verwalter', asyn
 });
 
 test('Alleinarbeit: Frist, Bestätigung, Fristalarm, Notruf, Kümmern, Ende', async () => {
-  const ma = await geraet('Ali', 'monteur');
-  const kollege = await geraet('Kim', 'monteur');
+  const ma = await geraet('Ali', 'mitarbeiter');
+  const kollege = await geraet('Kim', 'mitarbeiter');
   assert.equal((await rufe('/alleinarbeit/start', { token: ma.token, body: { minuten: 7 } })).status, 400);
   const s = await rufe('/alleinarbeit/start', { token: ma.token, body: { minuten: 30, ort: { lat: 50.7, lon: 7.1, genau: 12 } } });
   assert.equal(s.status, 200);
@@ -359,8 +366,8 @@ test('Alleinarbeit: Frist, Bestätigung, Fristalarm, Notruf, Kümmern, Ende', as
 });
 
 test('Alleinarbeit: Empfänger sehen nur ihre Person, Notfallkontakte bekommen E-Mail und Entwarnung', async () => {
-  const ma = await geraet('Ute', 'monteur');
-  const kollege = await geraet('Jan', 'monteur');
+  const ma = await geraet('Ute', 'mitarbeiter');
+  const kollege = await geraet('Jan', 'mitarbeiter');
   // Notfallkontakt eintragen, ungültige Adresse abgewiesen.
   assert.equal((await rufe('/notfallkontakte', { token: ma.token, body: { kontakte: [{ name: 'Mama', email: 'kein-mail' }] } })).status, 400);
   post.length = 0;
@@ -440,7 +447,7 @@ test('Löschen aus der App: Gerät, Person, Privatkonto, Betrieb', async () => {
   const b = speicher.betriebAnlegen('Löschprobe KG');
   const anm = async (name, rolle) => (await rufe('/anmelden', { body: { code: speicher.einladen(b, name, rolle).code } })).daten;
   const chef = await anm('Chefin', 'verwalter');
-  const ma = await anm('Mo', 'monteur');
+  const ma = await anm('Mo', 'mitarbeiter');
   assert.equal((await rufe('/konto/loeschen', { token: chef.token, body: { art: 'person' } })).status, 409);
   assert.equal((await rufe('/konto/loeschen', { token: ma.token, body: { art: 'person' } })).daten.geloescht, 'person');
   assert.equal((await rufe('/ich', { token: ma.token })).status, 401);
@@ -451,7 +458,7 @@ test('Löschen aus der App: Gerät, Person, Privatkonto, Betrieb', async () => {
 
 test('Push: Token anmelden, Alarm an Kollegen und Empfänger, Nachricht an Empfänger', async () => {
   const b = speicher.betriebAnlegen('Push GmbH');
-  const anm = async (name) => (await rufe('/anmelden', { body: { code: speicher.einladen(b, name, 'monteur').code } })).daten;
+  const anm = async (name) => (await rufe('/anmelden', { body: { code: speicher.einladen(b, name, 'mitarbeiter').code } })).daten;
   const a = await anm('Anna');
   const k = await anm('Kai');
   const einl = (await rufe('/empfaenger/einladung', { token: a.token, body: { name: 'Opa' } })).daten;
@@ -476,7 +483,7 @@ test('Push: Token anmelden, Alarm an Kollegen und Empfänger, Nachricht an Empf�
 
 test('Unterwegs: Link für den Kunden zeigt nur gerundete Entfernung, Kollegen sehen die Fahrt', async () => {
   const b = speicher.betriebAnlegen('Weg GmbH');
-  const anm = async (name) => (await rufe('/anmelden', { body: { code: speicher.einladen(b, name, 'monteur').code } })).daten;
+  const anm = async (name) => (await rufe('/anmelden', { body: { code: speicher.einladen(b, name, 'mitarbeiter').code } })).daten;
   const m = await anm('Max Mustermann');
   const k = await anm('Kim');
   const ziel = { lat: 50.73, lon: 7.1 };
@@ -509,8 +516,8 @@ test('Post: HTML-Fassung macht Links zu Knöpfen und maskiert Text', async () =>
 test('Freigaben: Mappe teilen, Seite und Download, PIN mit Sperre, neue Fassung, Widerruf, Rechte', async () => {
   const b = speicher.betriebAnlegen('Elektro Kurz');
   const anm = async (name, rolle) => (await rufe('/anmelden', { body: { code: speicher.einladen(b, name, rolle).code } })).daten;
-  const m = await anm('Mia', 'monteur');
-  const k = await anm('Kai', 'monteur');
+  const m = await anm('Mia', 'mitarbeiter');
+  const k = await anm('Kai', 'mitarbeiter');
   const v = await anm('Vera', 'verwalter');
   const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M0 0 L10 10"/></svg>').toString('base64');
   const pdf = Buffer.from('%PDF-1.7\n1 0 obj<<>>endobj\n%%EOF').toString('base64');
@@ -580,7 +587,7 @@ test('Freigaben: Mappe teilen, Seite und Download, PIN mit Sperre, neue Fassung,
 test('Freigaben: Ablauf löscht die Dateien, Kontolöschung entfernt den Namen', async () => {
   const { abgelaufeneAufraeumen } = await import('../freigaben.mjs');
   const b = speicher.betriebAnlegen('Sanitär Lang');
-  const m = (await rufe('/anmelden', { body: { code: speicher.einladen(b, 'Lea Lang', 'monteur').code } })).daten;
+  const m = (await rufe('/anmelden', { body: { code: speicher.einladen(b, 'Lea Lang', 'mitarbeiter').code } })).daten;
   const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>').toString('base64');
   const r = (await rufe('/freigabe', { token: m.token, body: { titel: 'Kurz', ablaufTage: 1, teile: [{ name: 'P', typ: 'image/svg+xml', daten: svg }] } })).daten;
   const pfad = new URL(r.link).pathname;
@@ -687,7 +694,7 @@ test('Objektraum: Firmen und Auftraggeber legen Punkte an, haken ab, schreiben; 
 
 test('Freigaben: per E-Mail senden (nur mit passendem Link), CSV als Datei', async () => {
   const b = speicher.betriebAnlegen('Dach Duc');
-  const m = (await rufe('/anmelden', { body: { code: speicher.einladen(b, 'Mo', 'monteur').code } })).daten;
+  const m = (await rufe('/anmelden', { body: { code: speicher.einladen(b, 'Mo', 'mitarbeiter').code } })).daten;
   const csv = Buffer.from('"EXTF";700;21;"Buchungsstapel"\r\n').toString('base64');
   const r = (await rufe('/freigabe', { token: m.token, body: { titel: 'DATEV 10/2026', ablaufTage: 30, teile: [{ name: 'EXTF.csv', typ: 'text/csv', daten: csv }] } })).daten;
   assert.ok(r.link);
@@ -733,7 +740,7 @@ test('Mail-Takt: im zentralen Hosting fest 15 Minuten, mit Serverpaket einstellb
 
 test('Freigaben: Tonaufnahme mit Abspieler, falscher Inhalt abgewiesen', async () => {
   const b = speicher.betriebAnlegen('Ton Tom');
-  const m = (await rufe('/anmelden', { body: { code: speicher.einladen(b, 'Tom', 'monteur').code } })).daten;
+  const m = (await rufe('/anmelden', { body: { code: speicher.einladen(b, 'Tom', 'mitarbeiter').code } })).daten;
   const m4a = Buffer.concat([Buffer.from([0, 0, 0, 0x20]), Buffer.from('ftypM4A '), Buffer.alloc(16)]).toString('base64');
   const r = await rufe('/freigabe', { token: m.token, body: { titel: 'Sprachnotiz', teile: [{ name: 'notiz.m4a', typ: 'audio/mp4', daten: m4a }] } });
   assert.equal(r.status, 200);
@@ -744,7 +751,7 @@ test('Freigaben: Tonaufnahme mit Abspieler, falscher Inhalt abgewiesen', async (
 
 test('Terminmitteilung: Mail an den Kunden, Bestätigen und Ablehnen per Link, Push, Änderung, Absage, Erinnerung', async () => {
   const b = speicher.betriebAnlegen('Bad & Heizung Roth');
-  const anm = async (name) => (await rufe('/anmelden', { body: { code: speicher.einladen(b, name, 'monteur').code } })).daten;
+  const anm = async (name) => (await rufe('/anmelden', { body: { code: speicher.einladen(b, name, 'mitarbeiter').code } })).daten;
   const m = await anm('Mia Roth');
   const k = await anm('Kai');
   await rufe('/push/token', { token: k.token, body: { token: 'ExponentPushToken[kaikaikaikaikai]', plattform: 'android' } });
@@ -1074,4 +1081,134 @@ test('Testbetrieb aus der App: Betrieb und Verwalter sofort, Stand in /ich, Gren
   } finally {
     srv.close();
   }
+});
+
+test('Browser auf der Wurzel: zentral Weiterleitung zur Produktseite, eigener Server ein Hinweis', async () => {
+  const lauf = async (pflicht) => {
+    const sp = oeffneSpeicher(':memory:');
+    const srv = erstelleDienst(sp, { zeitgeber: false, vertragPflicht: pflicht, senden: () => {}, push: async () => {} });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    try {
+      return await fetch(`http://127.0.0.1:${srv.address().port}/`, { redirect: 'manual' });
+    } finally {
+      srv.close();
+    }
+  };
+  const zentral = await lauf(true);
+  assert.equal(zentral.status, 302);
+  assert.equal(zentral.headers.get('location'), 'https://feif.space/apps-software/montix/');
+  const eigen = await lauf(false);
+  assert.equal(eigen.status, 200);
+  assert.match(await eigen.text(), /Montix-Server/);
+});
+
+test('Etikettenregister: Ausweiskarten ordnet nur ein Verwalter zu; gesperrte Karten werden abgelehnt', async () => {
+  const chef = await geraet('Vera', 'verwalter');
+  const ma = await geraet('Kurt', 'mitarbeiter');
+  const karte = (id, inhalt, s) => ({ sammlung: 'etiketten', id, geaendert: t(s), inhalt: { id, createdAt: t(s), updatedAt: t(s), ...inhalt } });
+  const alles = async (token) => {
+    const l = [];
+    for (let seit = 0, mehr = true; mehr; ) {
+      const d = (await rufe(`/abgleich?seit=${seit}`, { token })).daten;
+      l.push(...d.aenderungen);
+      ({ mehr } = d);
+      seit = d.rev;
+    }
+    return l.filter((a) => a.sammlung === 'etiketten');
+  };
+
+  // Monteur: Objekt-Etikett ja, Ausweis nein.
+  await rufe('/abgleich', {
+    token: ma.token,
+    body: { aenderungen: [karte('04A1B2', { art: 'objekt', ziel: '/clients/k1', name: 'Heizung' }, 1), karte('04FFFF', { art: 'ausweis', ziel: ma.mitarbeiter.id, name: 'Kurt' }, 1)] },
+  });
+  let ids = (await alles(chef.token)).map((a) => a.id);
+  assert.ok(ids.includes('04A1B2'));
+  assert.ok(!ids.includes('04FFFF'));
+  assert.equal((await rufe('/ausweis', { token: chef.token, body: { kennung: '04:ff:ff' } })).status, 404);
+
+  // Verwalter lernt die Karte an; jedes Gerät kann sie nachschlagen (Kennung auch mit Trennzeichen).
+  await rufe('/abgleich', { token: chef.token, body: { aenderungen: [karte('04C0DE', { art: 'ausweis', ziel: ma.mitarbeiter.id, name: 'Kurt' }, 2)] } });
+  const ok = await rufe('/ausweis', { token: ma.token, body: { kennung: '04:c0:de' } });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(ok.daten.mitarbeiter, { id: ma.mitarbeiter.id, name: 'Kurt' });
+
+  // Monteur darf die Ausweiskarte weder umdeuten noch löschen.
+  await rufe('/abgleich', {
+    token: ma.token,
+    body: { aenderungen: [karte('04C0DE', { art: 'objekt', ziel: '/clients/k1', name: 'umgedeutet' }, 3), { sammlung: 'etiketten', id: '04C0DE', geaendert: t(4), geloescht: true }] },
+  });
+  const nachher = (await alles(chef.token)).find((a) => a.id === '04C0DE');
+  assert.equal(nachher.inhalt.art, 'ausweis');
+  assert.ok(!nachher.geloescht);
+
+  // Verwalter sperrt die Karte (verloren): abgelehnt, die Person bleibt.
+  await rufe('/abgleich', { token: chef.token, body: { aenderungen: [karte('04C0DE', { art: 'ausweis', ziel: ma.mitarbeiter.id, name: 'Kurt', gesperrt: true }, 5)] } });
+  const gesperrt = await rufe('/ausweis', { token: ma.token, body: { kennung: '04C0DE' } });
+  assert.equal(gesperrt.status, 403);
+  assert.match(gesperrt.daten.fehler, /gesperrt/);
+  assert.equal((await rufe('/ich', { token: ma.token })).status, 200);
+
+  // Zweite Karte für dieselbe Person; ist die Person gesperrt, gilt auch sie nicht.
+  await rufe('/abgleich', { token: chef.token, body: { aenderungen: [karte('04BEEF', { art: 'ausweis', ziel: ma.mitarbeiter.id, name: 'Kurt' }, 6)] } });
+  assert.equal((await rufe('/ausweis', { token: chef.token, body: { kennung: '04BEEF' } })).status, 200);
+  await rufe('/mitarbeiter/aktiv', { token: chef.token, body: { id: ma.mitarbeiter.id, aktiv: false } });
+  assert.equal((await rufe('/ausweis', { token: chef.token, body: { kennung: '04BEEF' } })).status, 403);
+  await rufe('/mitarbeiter/aktiv', { token: chef.token, body: { id: ma.mitarbeiter.id, aktiv: true } });
+
+  // Konto löschen: die Ausweiskarten der Person verschwinden aus dem Register.
+  assert.equal((await rufe('/konto/loeschen', { token: ma.token, body: { art: 'person' } })).status, 200);
+  ids = (await alles(chef.token)).filter((a) => !a.geloescht).map((a) => a.id);
+  assert.ok(!ids.includes('04BEEF'));
+  assert.ok(ids.includes('04A1B2'));
+});
+
+test('Leergutarten (Sammlung leergut) gleichen ab wie Stammdaten; Leergutbestand liegt in lager', async () => {
+  const a = await geraet('Lena', 'verwalter');
+  const b = await geraet('Lars', 'mitarbeiter');
+  const kasten = { id: 'lg_kasten', name: 'Kasten', pfand: 1.5, ust: { category: 'S', rate: 19 }, createdAt: t(1), updatedAt: t(1) };
+  const zugang = { id: 'lb_x_1', artikelId: 'lg_kasten', art: 'eingang', menge: 3, zeit: t(2), updatedAt: t(2) };
+  const r = await rufe('/abgleich', {
+    token: b.token,
+    body: { aenderungen: [{ sammlung: 'leergut', id: kasten.id, geaendert: t(1), inhalt: kasten }, { sammlung: 'lager', id: zugang.id, geaendert: t(2), inhalt: zugang }] },
+  });
+  assert.equal(r.status, 200, JSON.stringify(r.daten));
+  const alle = [];
+  for (let seit = 0, mehr = true; mehr; ) {
+    const d = (await rufe(`/abgleich?seit=${seit}`, { token: a.token })).daten;
+    alle.push(...d.aenderungen);
+    ({ mehr } = d);
+    seit = d.rev;
+  }
+  assert.equal(alle.find((x) => x.sammlung === 'leergut' && x.id === 'lg_kasten')?.inhalt.pfand, 1.5);
+  assert.equal(alle.find((x) => x.sammlung === 'lager' && x.id === 'lb_x_1')?.inhalt.artikelId, 'lg_kasten');
+});
+
+test('Einkauf: Lieferanten nur mit Recht „Einkauf“, Bestellungen auch mit „Lager buchen“ (Wareneingang)', async () => {
+  const chef = await geraet('Edda', 'verwalter');
+  const lager = await geraet('Lutz', 'mitarbeiter'); // eingeschränkt, mit „Lager buchen“
+  const einkauf = await geraet('Ines', 'mitarbeiter'); // eingeschränkt, mit „Einkauf“
+  const ohne = await geraet('Olaf', 'mitarbeiter'); // eingeschränkt, ohne Warenrechte
+  const voll = await geraet('Vera2', 'mitarbeiter'); // alle Bereiche (null) — bucht Lager wie bisher
+  const rechte = (wer, bereiche) => rufe('/mitarbeiter/rechte', { token: chef.token, body: { id: wer.mitarbeiter.id, bereiche } });
+  assert.equal((await rechte(lager, ['articles', 'recht:lager'])).status, 200);
+  assert.equal((await rechte(einkauf, ['articles', 'recht:einkauf'])).status, 200);
+  assert.equal((await rechte(ohne, ['articles'])).status, 200);
+
+  const lieferant = (id, s) => ({ sammlung: 'lieferanten', id, geaendert: t(s), inhalt: { id, party: { name: id }, createdAt: t(s), updatedAt: t(s) } });
+  const bestellung = (id, s) => ({ sammlung: 'bestellungen', id, geaendert: t(s), inhalt: { id, lieferantId: 'L', status: 'bestellt', positionen: [], createdAt: t(s), updatedAt: t(s) } });
+  for (const [wer, n] of [[chef, 'chef'], [lager, 'lager'], [einkauf, 'einkauf'], [ohne, 'ohne'], [voll, 'voll']]) {
+    const r = await rufe('/abgleich', { token: wer.token, body: { aenderungen: [lieferant(`L-${n}`, 1), bestellung(`B-${n}`, 1)] } });
+    assert.equal(r.status, 200, JSON.stringify(r.daten));
+  }
+  const alle = [];
+  for (let seit = 0, mehr = true; mehr; ) {
+    const d = (await rufe(`/abgleich?seit=${seit}`, { token: chef.token })).daten;
+    alle.push(...d.aenderungen);
+    ({ mehr } = d);
+    seit = d.rev;
+  }
+  const ids = (s) => alle.filter((a) => a.sammlung === s).map((a) => a.id).sort();
+  assert.deepEqual(ids('lieferanten'), ['L-chef', 'L-einkauf']);
+  assert.deepEqual(ids('bestellungen'), ['B-chef', 'B-einkauf', 'B-lager', 'B-voll']);
 });

@@ -8,7 +8,10 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 /** Was die App abgleichen darf. Alles andere weist der Server ab. */
-export const SAMMLUNGEN = ['kunden', 'artikel', 'termine', 'plaene', 'berichte', 'unterschriften', 'belege', 'sprachnotizen', 'schritte', 'aktionen', 'zeichnungen', 'lager', 'roh', 'dateien'];
+export const SAMMLUNGEN = ['kunden', 'artikel', 'termine', 'plaene', 'berichte', 'unterschriften', 'belege', 'sprachnotizen', 'schritte', 'aktionen', 'zeichnungen', 'lager', 'etiketten', 'ankuenfte', 'leergut', 'lieferanten', 'bestellungen', 'touren', 'tourereignisse', 'roh', 'dateien'];
+
+/** Kennung eines NFC-Etiketts (UID) einheitlich: Großbuchstaben, nur Hex-Ziffern. */
+export const kennungNorm = (k) => String(k ?? '').toUpperCase().replace(/[^0-9A-F]/g, '');
 
 /** Zeichen ohne Verwechslungsgefahr (kein 0/O, 1/I/L) — Codes werden abgetippt. */
 const ZEICHEN = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -22,6 +25,33 @@ export function zufallsCode(gruppen = 3, laenge = 4) {
 }
 
 const jetzt = () => new Date().toISOString();
+
+/** Nummernkreise je Art und Jahr (über POST /nummer). */
+export const PRAEFIX = { angebot: 'AN', lieferschein: 'LS', rechnung: 'RE' };
+
+/**
+ * Präfix zu einer Art. Dazu kommt je Kasse ein eigener Kreis `kassenbeleg:<Kassen-ID>` →
+ * „KB-<Kassen-ID>“. Den vergibt nur die Barkasse (kasse.mjs) selbst, in derselben Transaktion, in
+ * der sie den Beleg speichert — nie über POST /nummer, sonst könnte eine Nummer ohne Beleg entstehen.
+ */
+const praefixVon = (art) => PRAEFIX[art] ?? (/^kassenbeleg:[A-Z0-9]{1,8}$/.test(art) ? `KB-${art.slice(12)}` : null);
+
+/**
+ * Nächste Nummer vergeben, OHNE eigene Transaktion — der Aufrufer hält sie (begin immediate).
+ * Gleicher Beleg, gleiche Nummer (idempotent).
+ */
+export function naechsteNummer(db, belegId, art, jahr) {
+  const praefix = praefixVon(art);
+  if (!praefix) throw new Error('Ungültige Angaben');
+  const da = db.prepare('select nummer from vergeben where beleg = ?').get(belegId);
+  if (da) return da.nummer;
+  const z = db.prepare('select letzte from nummern where art = ? and jahr = ?').get(art, jahr);
+  const n = (z?.letzte ?? 0) + 1;
+  db.prepare('insert into nummern values (?, ?, ?) on conflict (art, jahr) do update set letzte = excluded.letzte').run(art, jahr, n);
+  const nummer = `${praefix}-${jahr}-${String(n).padStart(4, '0')}`;
+  db.prepare('insert into vergeben values (?, ?, ?, ?)').run(belegId, art, nummer, jetzt());
+  return nummer;
+}
 
 export function oeffneSpeicher(ordner) {
   const memory = ordner === ':memory:';
@@ -68,7 +98,7 @@ export function oeffneSpeicher(ordner) {
       create table if not exists stand (schluessel text primary key, wert integer not null);
       insert or ignore into stand values ('rev', 0);
       create table if not exists mitarbeiter (
-        id text primary key, name text not null, rolle text not null default 'monteur',
+        id text primary key, name text not null, rolle text not null default 'mitarbeiter',
         aktiv integer not null default 1, erstellt text not null
       );
       create table if not exists geraete (
@@ -133,13 +163,13 @@ export function oeffneSpeicher(ordner) {
 
     /**
      * Stammdaten eines Mitarbeiters ändern (Verwalter). Der letzte Verwalter kann nicht zum
-     * Monteur werden — sonst könnte niemand mehr den Betrieb verwalten.
+     * Mitarbeiter werden — sonst könnte niemand mehr den Betrieb verwalten.
      */
     mitarbeiterDaten(db, id, d) {
       const m = db.prepare('select * from mitarbeiter where id = ?').get(id);
       if (!m) return 'unbekannt';
-      const rolle = d.rolle === 'verwalter' || d.rolle === 'monteur' ? d.rolle : m.rolle;
-      if (m.rolle === 'verwalter' && rolle === 'monteur') {
+      const rolle = d.rolle === 'verwalter' || d.rolle === 'mitarbeiter' ? d.rolle : m.rolle;
+      if (m.rolle === 'verwalter' && rolle === 'mitarbeiter') {
         const verwalter = db.prepare("select count(*) as n from mitarbeiter where rolle = 'verwalter' and aktiv = 1").get().n;
         if (verwalter <= 1) return 'letzter';
       }
@@ -222,6 +252,15 @@ export function oeffneSpeicher(ordner) {
           // Tabelle gibt es (noch) nicht
         }
       db.prepare("delete from daten where sammlung = 'schritte' and substr(id, 1, ?) = ?").run(id.length + 1, `${id}_`);
+      // Ausweiskarten der Person aus dem Etikettenregister nehmen (als Grabstein, damit die Geräte es erfahren).
+      const karten = db
+        .prepare("select id, inhalt from daten where sammlung = 'etiketten' and geloescht = 0")
+        .all()
+        .filter((z) => {
+          const e = JSON.parse(z.inhalt);
+          return e?.art === 'ausweis' && e.ziel === id;
+        });
+      if (karten.length) this.schreiben(db, id, karten.map((z) => ({ sammlung: 'etiketten', id: z.id, geaendert: jetzt(), geloescht: true })));
       db.prepare("update mitarbeiter set aktiv = 0, name = 'gelöscht', kuerzel = null, telefon = null, email = null where id = ?").run(id);
     },
 
@@ -304,15 +343,17 @@ export function oeffneSpeicher(ordner) {
     },
 
     /** Mitarbeiter anlegen (oder vorhandenen nehmen) und einen Einladungscode für ein Gerät ausgeben. */
-    einladen(betriebId, name, rolle = 'monteur', tage = 7) {
+    einladen(betriebId, name, rolle = 'mitarbeiter', tage = 7) {
       if (!this.betriebName(betriebId)) throw new Error('Unbekannter Betrieb');
-      if (!['verwalter', 'monteur'].includes(rolle)) throw new Error('Rolle ist verwalter oder monteur');
+      if (!['verwalter', 'mitarbeiter', 'fremdfahrer', 'partner'].includes(rolle)) throw new Error('Rolle ist verwalter, mitarbeiter, fremdfahrer oder partner');
       const db = betrieb(betriebId);
       let m = db.prepare('select id from mitarbeiter where name = ?').get(name);
       if (!m) {
         m = { id: `ma_${randomBytes(5).toString('hex')}` };
         db.prepare('insert into mitarbeiter (id, name, rolle, erstellt) values (?, ?, ?, ?)').run(m.id, name, rolle, jetzt());
       } else db.prepare('update mitarbeiter set rolle = ?, aktiv = 1 where id = ?').run(rolle, m.id);
+      // Fremdfahrer sehen in der App nur Touren und Nachrichten (der Server filtert die Daten zusätzlich).
+      if (rolle === 'fremdfahrer' || rolle === 'partner') db.prepare('update mitarbeiter set bereiche = ? where id = ?').run(JSON.stringify(['touren', 'nachrichten']), m.id);
       const code = zufallsCode();
       const bis = new Date(Date.now() + tage * 86400000).toISOString();
       verzeichnis.prepare('insert into einladungen values (?, ?, ?, ?, null)').run(hash(code), betriebId, m.id, bis);
@@ -373,6 +414,21 @@ export function oeffneSpeicher(ordner) {
     },
 
     /** Mitarbeiter sperren oder wieder zulassen; gesperrt gelten seine Geräte-Tokens nicht mehr. */
+    /**
+     * Fremdfahrer und Partnerbetriebe („Andere Firmen“ → Firmen, die für uns arbeiten): mit Stand
+     * der letzten Einladung (offen bis … / eingelöst) und Zahl der angemeldeten Geräte.
+     */
+    gaesteListe(db) {
+      const letzte = verzeichnis.prepare('select gueltig_bis, benutzt from einladungen where mitarbeiter = ? order by gueltig_bis desc limit 1');
+      return db
+        .prepare("select m.id, m.name, m.rolle, m.aktiv, m.erstellt, (select count(*) from geraete g where g.mitarbeiter = m.id) as geraete from mitarbeiter m where m.rolle in ('fremdfahrer', 'partner') order by m.name")
+        .all()
+        .map((m) => {
+          const e = letzte.get(m.id);
+          return { id: m.id, name: m.name, rolle: m.rolle, aktiv: !!m.aktiv, geraete: m.geraete, einladung: e ? { bis: e.gueltig_bis, eingeloest: e.benutzt ?? null } : null };
+        });
+    },
+
     mitarbeiterAktiv(db, id, aktiv) {
       return db.prepare('update mitarbeiter set aktiv = ? where id = ?').run(aktiv ? 1 : 0, id).changes > 0;
     },
@@ -436,18 +492,26 @@ export function oeffneSpeicher(ordner) {
      * auch wenn mehrere Geräte offline waren. Gleicher Beleg, gleiche Nummer (idempotent).
      */
     nummer(db, belegId, art, jahr) {
-      const PRAEFIX = { angebot: 'AN', lieferschein: 'LS', rechnung: 'RE' };
       if (!PRAEFIX[art] || !Number.isInteger(jahr) || jahr < 2000 || jahr > 2200) throw new Error('Ungültige Angaben');
-      return inTransaktion(db, () => {
-        const da = db.prepare('select nummer from vergeben where beleg = ?').get(belegId);
-        if (da) return da.nummer;
-        const z = db.prepare('select letzte from nummern where art = ? and jahr = ?').get(art, jahr);
-        const n = (z?.letzte ?? 0) + 1;
-        db.prepare('insert into nummern values (?, ?, ?) on conflict (art, jahr) do update set letzte = excluded.letzte').run(art, jahr, n);
-        const nummer = `${PRAEFIX[art]}-${jahr}-${String(n).padStart(4, '0')}`;
-        db.prepare('insert into vergeben values (?, ?, ?, ?)').run(belegId, art, nummer, jetzt());
-        return nummer;
-      });
+      return inTransaktion(db, () => naechsteNummer(db, belegId, art, jahr));
+    },
+
+    /**
+     * Mitarbeiterausweis nachschlagen (NFC-Karte → Person). Das Etikettenregister ist eine
+     * abgeglichene Sammlung; hier entscheidet der Server mit dem aktuellen Stand: unbekannte,
+     * gesperrte Karten und gesperrte Personen werden abgelehnt.
+     */
+    ausweis(db, kennung) {
+      const id = kennungNorm(kennung);
+      if (!id) return 'unbekannt';
+      const z = db.prepare("select inhalt from daten where sammlung = 'etiketten' and id = ? and geloescht = 0").get(id);
+      const e = z ? JSON.parse(z.inhalt) : null;
+      if (!e || e.art !== 'ausweis' || typeof e.ziel !== 'string') return 'unbekannt';
+      if (e.gesperrt) return 'gesperrt';
+      const m = db.prepare("select id, name, aktiv from mitarbeiter where id = ? and rolle != 'empfaenger'").get(e.ziel);
+      if (!m) return 'unbekannt';
+      if (!m.aktiv) return 'inaktiv';
+      return { id: m.id, name: m.name };
     },
 
     /** Nummernstand übernehmen, z. B. wenn ein Einzelplatz-Gerät in den Betrieb wechselt. */

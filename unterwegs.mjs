@@ -1,5 +1,5 @@
-// Unterwegs zum Kunden: Der Monteur tippt „Losfahren“, der Kunde bekommt einen Link und sieht dort,
-// wie weit der Monteur ungefähr noch entfernt ist — gerundet, ohne Karte und ohne genauen Ort
+// Unterwegs zum Kunden: Der Mitarbeiter tippt „Losfahren“, der Kunde bekommt einen Link und sieht dort,
+// wie weit der Mitarbeiter ungefähr noch entfernt ist — gerundet, ohne Karte und ohne genauen Ort
 // (Schutz des Mitarbeiters). Kollegen sehen in der App, wer gerade wohin unterwegs ist.
 //
 //   POST /unterwegs/start {termin, kunde, ziel?, ort?} → { id, link }   ziel = Ort des Kunden, wenn bekannt

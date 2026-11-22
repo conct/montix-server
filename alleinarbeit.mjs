@@ -1,4 +1,4 @@
-// Alleinarbeit (Totmannschalter) — Arbeitsschutz für Monteure, die allein arbeiten (Keller,
+// Alleinarbeit (Totmannschalter) — Arbeitsschutz für Mitarbeiter, die allein arbeiten (Keller,
 // Schacht, Dachboden). Wer beginnt, nennt ein Intervall; bis zur Frist muss er „Alles in Ordnung“
 // bestätigen. Bleibt das aus oder drückt er „Notruf“, steht bei allen Kollegen des Betriebs ein
 // Alarm. Die Frist überwacht der Server — so kommt der Alarm auch, wenn das Handy ausfällt.

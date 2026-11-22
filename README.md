@@ -10,7 +10,8 @@ Arbeitsberichte, Unterschriften und Belege ab, und **nur der Server vergibt Bele
 ziehen zwei Geräte nie dieselbe. Offline arbeitet jedes Gerät weiter und schickt seine Änderungen
 beim nächsten Kontakt nach. Ändern zwei Geräte dasselbe, gewinnt die jüngere Änderung. Dazu
 kommen Alleinarbeit mit Alarm, Nachrichten, Push, Freigaben an andere Firmen, Objekträume,
-Terminmitteilungen an Kunden und das Postfach je Mitarbeiter.
+Terminmitteilungen an Kunden, das Postfach je Mitarbeiter, die Barkasse mit TSE und Touren für
+Speditionen mit Live-Lage, Empfänger-Link und Partnerbetrieben.
 
 - **Node.js 24** oder neuer, **keine Pakete**: `node:sqlite` und `node:http` sind eingebaut.
 - Eine SQLite-Datei je Betrieb unter `daten/`. Sichern heißt: den Ordner `daten/` kopieren.
@@ -68,18 +69,43 @@ Geräte).
 | `MONTIX_SENDMAIL` | `/usr/sbin/sendmail` | Versand von Alarmen, Freigaben und Terminen; fehlt es, wird nur protokolliert |
 | `MONTIX_PRAEFIX` | leer | Wenn der Dienst unter einem Pfad läuft, z. B. `/montix` |
 | `MONTIX_PYTHON` | `python3` | Für das Postfach je Mitarbeiter (IMAP/SMTP über `mail-helfer.py`) |
-| `MONTIX_PHOTON` | `https://photon.komoot.io` | Adressvorschläge (OpenStreetMap); eine eigene Photon-Instanz geht auch |
+| `MONTIX_PHOTON` | `https://photon.komoot.io` | Adressvorschläge und Orte der Tour-Stopps (OpenStreetMap); eine eigene Photon-Instanz geht auch |
+| `MONTIX_ORS_KEY` | leer | Touren: Lkw-Fahrzeiten über openrouteservice; ohne Schlüssel schätzt der Server aus der Luftlinie |
+| `MONTIX_KARTE` | `karte/karte.pmtiles` | Kartendatei für die Touren-Karten (siehe unten) |
+| `TSE_ANBIETER`, `TSE_API_KEY`, `TSE_API_SECRET`, `TSE_TSS_ID` | leer | Barkasse: Vorgabe für die TSE bei fiskaly (sonst in der App einrichten) |
 
 ## Was den Server verlässt
 
 - **Push** über den Push-Dienst von Expo (`exp.host`): nur Titel und kurzer Text, etwa
   „Nachricht von Erika“.
 - **Adressvorschläge**: der eingetippte Text geht an Photon (`MONTIX_PHOTON`).
+- **Touren**: die Anschriften der Stopps (ohne Namen) an Photon; mit `MONTIX_ORS_KEY` zwei
+  Koordinatenpaare an openrouteservice. Ohne Kartendatei laden die Browser der Disposition und der
+  Empfänger die Kartenbilder von OpenStreetMap.
+- **Barkasse**: die Signaturanfragen an fiskaly, wenn eine TSE eingerichtet ist.
+- **Partnerbetriebe**: übernimmt Ihr Betrieb eine Tour einer anderen Firma, schickt der Server deren
+  Server die Meldungen und die Position zu dieser Tour.
 - **Fehler melden** in der App: Diese Meldung geht per Mail an den Montix-Support, damit wir
   helfen können.
 - Mails an Notfallkontakte, Kunden und Firmen gehen über Ihr `sendmail`.
 
 Sonst nichts: keine Statistik, keine Meldung an uns.
+
+## Touren und Karten
+
+Die Karten (Live-Lage der Disposition, Seite für den Empfänger) liefert der Server selbst aus:
+Leaflet und protomaps-leaflet liegen in `karte/`. Für die Kartenbilder gehört eine Datei
+`karte/karte.pmtiles` dazu, mehrere GB groß und deshalb nicht im Repository. Anlegen mit dem
+Programm [pmtiles](https://github.com/protomaps/go-pmtiles/releases) aus dem täglichen Build von
+Protomaps (Liste der Stände: https://build-metadata.protomaps.dev/builds.json):
+
+```
+pmtiles extract https://build.protomaps.com/<JJJJMMTT>.pmtiles karte/karte-neu.pmtiles --bbox=5.86,47.27,15.04,55.06 --maxzoom=15
+mv karte/karte-neu.pmtiles karte/karte.pmtiles
+```
+
+Die bbox ist Deutschland (etwa 7 GB). Ohne Datei nehmen die Karten die Kacheln von OpenStreetMap;
+`/karte/info` sagt, was gilt. Ein Neustart ist nicht nötig.
 
 ## Aktualisieren
 

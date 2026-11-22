@@ -484,3 +484,26 @@ export function betriebEinladungMail({ name, betrieb, code, gueltigBis, link, te
   ].join('\n');
   return { betreff: titel, text, html };
 }
+
+/** Touren: Link für den Empfänger einer Lieferung (Status, voraussichtliche Ankunft, Zustellnachweis). */
+export function sendungMail({ empfaenger, sendung, datum, fenster, link }, betrieb) {
+  const von = betrieb?.name ?? 'Ihre Spedition';
+  const tag = datum ? new Date(`${datum}T12:00:00Z`).toLocaleDateString('de-DE', { weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Europe/Berlin' }) : '';
+  const wann = [tag, fenster?.von ? `${fenster.von}${fenster.bis ? `–${fenster.bis}` : ''} Uhr` : ''].filter(Boolean).join(', ');
+  const grund = `Sie bekommen diese Nachricht, weil ${von} eine Lieferung an Sie ausführt.`;
+  const html = rahmen({
+    farbe: FARBEN.blau,
+    oberzeile: `Lieferung · ${von}`,
+    titel: sendung ? `Ihre Sendung ${sendung}` : 'Ihre Lieferung',
+    vorschau: wann ? `Geplant: ${wann}` : 'Verfolgen Sie Ihre Lieferung',
+    betrieb,
+    grund,
+    inhalt: [
+      absatz(sicher(empfaenger ? `Guten Tag ${empfaenger},` : 'Guten Tag,')),
+      absatz(`${sicher(von)} liefert an Sie${wann ? ` – geplant <strong>${sicher(wann)}</strong>` : ''}. Über den Link sehen Sie, wann das Fahrzeug voraussichtlich ankommt, und nach der Zustellung den Nachweis.`),
+      `<p style="margin:0 0 18px;">${knopf(link, 'Lieferung verfolgen')}</p>`,
+    ].join('\n'),
+  });
+  const text = [empfaenger ? `Guten Tag ${empfaenger},` : 'Guten Tag,', '', `${von} liefert an Sie${wann ? ` – geplant ${wann}` : ''}.`, '', `Lieferung verfolgen: ${link}`, ...textFuss(grund, betrieb)].join('\n');
+  return { betreff: `${sendung ? `Sendung ${sendung}` : 'Ihre Lieferung'} – ${von}`, text, html };
+}

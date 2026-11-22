@@ -1,0 +1,3 @@
+# Kartendaten (mehrere GB) liegen nur auf dem Server, siehe karte.mjs
+*.pmtiles
+*.log
