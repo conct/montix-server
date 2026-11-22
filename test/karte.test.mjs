@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 
 import { erstelleDienst } from '../dienst.mjs';
+import { karteHolen } from '../karte.mjs';
 import { oeffneSpeicher } from '../speicher.mjs';
 
 let server;
@@ -31,12 +32,12 @@ test('Karte: Bibliotheken vom eigenen Server, Kacheln mit Range, ohne Datei Hinw
   assert.equal((await fetch(`${basis}/karte/gibtsnicht.js`)).status, 401);
 
   process.env.MONTIX_KARTE = join(ordner, 'fehlt.pmtiles');
-  assert.deepEqual(await (await fetch(`${basis}/karte/info`)).json(), { kacheln: false });
+  assert.deepEqual(await (await fetch(`${basis}/karte/info`)).json(), { kacheln: false, holen: 'node verwalten.mjs karte' });
   assert.equal((await fetch(`${basis}/karte/karte.pmtiles`)).status, 404);
 
   writeFileSync(datei, Buffer.from('0123456789abcdef'));
   process.env.MONTIX_KARTE = datei;
-  assert.deepEqual(await (await fetch(`${basis}/karte/info`)).json(), { kacheln: true });
+  assert.equal((await (await fetch(`${basis}/karte/info`)).json()).kacheln, true);
   const teil = await fetch(`${basis}/karte/karte.pmtiles`, { headers: { range: 'bytes=2-5' } });
   assert.equal(teil.status, 206);
   assert.equal(teil.headers.get('content-range'), 'bytes 2-5/16');
@@ -46,4 +47,24 @@ test('Karte: Bibliotheken vom eigenen Server, Kacheln mit Range, ohne Datei Hinw
   assert.equal(await ende.text(), 'def');
   assert.equal((await fetch(`${basis}/karte/karte.pmtiles`, { headers: { range: 'bytes=99-' } })).status, 416);
   assert.equal((await (await fetch(`${basis}/karte/karte.pmtiles`)).text()).length, 16);
+});
+
+test('Karte holen: vom Server laden, fortsetzen, bei gleichem Stand nichts tun', async () => {
+  writeFileSync(datei, Buffer.alloc(300_000, 7));
+  process.env.MONTIX_KARTE = datei;
+  const ziel = join(ordner, 'geholt.pmtiles');
+  const still = () => {};
+  const a = await karteHolen({ quelle: `${basis}/karte/karte.pmtiles`, ziel, melden: still });
+  assert.deepEqual(a, { neu: true, groesse: 300_000 });
+  assert.deepEqual(await karteHolen({ quelle: `${basis}/karte/karte.pmtiles`, ziel, melden: still }), { neu: false, groesse: 300_000 });
+  // Abgebrochener Download: Teil liegt da, nächster Aufruf setzt fort.
+  rmSync(ziel);
+  rmSync(`${ziel}.etag`);
+  writeFileSync(`${ziel}.teil`, Buffer.alloc(1000, 7));
+  const etag = (await fetch(`${basis}/karte/karte.pmtiles`, { headers: { range: 'bytes=0-0' } })).headers.get('etag');
+  writeFileSync(`${ziel}.teil.etag`, etag);
+  const meldungen = [];
+  await karteHolen({ quelle: `${basis}/karte/karte.pmtiles`, ziel, melden: (m) => meldungen.push(m) });
+  assert.ok(meldungen[0].startsWith('Setze fort'), meldungen[0]);
+  assert.equal(readFileSync(ziel).length, 300_000);
 });

@@ -6,8 +6,10 @@
 //                                                                 → Einladungscode (7 Tage einlösbar, einmal)
 //   node verwalten.mjs serverpaket <betrieb> an|aus               → gebuchtes Serverpaket (z. B. Mail-Takt einstellbar)
 //   node verwalten.mjs modul <betrieb> kasse <anzahl>             → gebuchte Kassen (Barkasse mit TSE, 0 = abbestellt)
+//   node verwalten.mjs karte                                      → Kartendatei für die Touren-Karten holen oder aktualisieren
 //
 // Daten wie beim Dienst über MONTIX_DATEN (Vorgabe ./daten).
+import { karteHolen, KARTE_QUELLE, kartenDatei } from './karte.mjs';
 import { MODULE, modulAnzahl, modulSetzen } from './module.mjs';
 import { hatServerpaket, serverpaketSetzen } from './raeume.mjs';
 import { oeffneSpeicher } from './speicher.mjs';
@@ -15,7 +17,15 @@ import { oeffneSpeicher } from './speicher.mjs';
 const speicher = oeffneSpeicher(process.env.MONTIX_DATEN ?? './daten');
 const [befehl, ...rest] = process.argv.slice(2);
 
-if (befehl === 'betrieb' && rest[0]) {
+if (befehl === 'karte') {
+  console.log(`Kartendatei (Deutschland, aus OpenStreetMap): ${KARTE_QUELLE} → ${kartenDatei()}`);
+  try {
+    await karteHolen();
+  } catch (e) {
+    console.log(`Fehler: ${e?.message ?? e}`);
+    process.exit(1);
+  }
+} else if (befehl === 'betrieb' && rest[0]) {
   const id = speicher.betriebAnlegen(rest[0]);
   console.log(`Betrieb angelegt: ${rest[0]}\nKennung: ${id}\nNächster Schritt: node verwalten.mjs einladung ${id} "<Name>" verwalter`);
 } else if (befehl === 'betrieb-loeschen' && rest[0]) {
@@ -52,6 +62,6 @@ Das Gerät bleibt danach dauerhaft angemeldet, bis es abgemeldet oder die Person
   const n = modulAnzahl(b.db, rest[1]);
   console.log(`${MODULE[rest[1]]} für ${b.name}: ${n ? `${n} gebucht` : 'nicht gebucht'}.`);
 } else {
-  console.log('Aufruf: node verwalten.mjs betrieb "<Name>" | betrieb-loeschen <betrieb> [--ja] | einladung <betrieb> "<Name>" [verwalter|mitarbeiter] | serverpaket <betrieb> an|aus | modul <betrieb> kasse <anzahl>');
+  console.log('Aufruf: node verwalten.mjs betrieb "<Name>" | betrieb-loeschen <betrieb> [--ja] | einladung <betrieb> "<Name>" [verwalter|mitarbeiter] | serverpaket <betrieb> an|aus | modul <betrieb> kasse <anzahl> | karte');
   process.exit(1);
 }

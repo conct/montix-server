@@ -72,6 +72,7 @@ Geräte).
 | `MONTIX_PHOTON` | `https://photon.komoot.io` | Adressvorschläge und Orte der Tour-Stopps (OpenStreetMap); eine eigene Photon-Instanz geht auch |
 | `MONTIX_ORS_KEY` | leer | Touren: Lkw-Fahrzeiten über openrouteservice; ohne Schlüssel schätzt der Server aus der Luftlinie |
 | `MONTIX_KARTE` | `karte/karte.pmtiles` | Kartendatei für die Touren-Karten (siehe unten) |
+| `MONTIX_KARTE_QUELLE` | `https://montix.feif.space/karte/karte.pmtiles` | Woher `node verwalten.mjs karte` die Datei holt |
 | `TSE_ANBIETER`, `TSE_API_KEY`, `TSE_API_SECRET`, `TSE_TSS_ID` | leer | Barkasse: Vorgabe für die TSE bei fiskaly (sonst in der App einrichten) |
 
 ## Was den Server verlässt
@@ -95,7 +96,18 @@ Sonst nichts: keine Statistik, keine Meldung an uns.
 
 Die Karten (Live-Lage der Disposition, Seite für den Empfänger) liefert der Server selbst aus:
 Leaflet und protomaps-leaflet liegen in `karte/`. Für die Kartenbilder gehört eine Datei
-`karte/karte.pmtiles` dazu, mehrere GB groß und deshalb nicht im Repository. Anlegen mit dem
+`karte/karte.pmtiles` dazu, mehrere GB groß und deshalb nicht im Repository. Am einfachsten holen
+Sie sie fertig vom Montix-Server:
+
+```
+MONTIX_DATEN=./daten node verwalten.mjs karte
+```
+
+Der Befehl setzt einen abgebrochenen Download fort und lädt nur, wenn es einen neueren Stand gibt —
+monatlich per Cron aufgerufen, bleibt die Karte aktuell. Ohne Datei weisen der Start des Servers und
+die Live-Lage in der App darauf hin.
+
+Selbst erzeugen (etwa für ein anderes Gebiet) geht mit dem
 Programm [pmtiles](https://github.com/protomaps/go-pmtiles/releases) aus dem täglichen Build von
 Protomaps (Liste der Stände: https://build-metadata.protomaps.dev/builds.json):
 

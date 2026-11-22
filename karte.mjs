@@ -5,7 +5,12 @@
 //   GET /karte/info            → { kacheln: true|false }  ob dieser Server Kartendaten hat
 //
 // Die Kartendatei ist mehrere GB groß und steht nicht im Repository. Sie liegt neben diesem
-// Modul in `karte/karte.pmtiles` (oder unter MONTIX_KARTE) und entsteht mit dem Programm pmtiles:
+// Modul in `karte/karte.pmtiles` (oder unter MONTIX_KARTE). Ein eigener Server holt sie am
+// einfachsten fertig vom Montix-Server (fortsetzbar, nur wenn es einen neueren Stand gibt):
+//
+//   node verwalten.mjs karte
+//
+// Selbst erzeugen geht mit dem Programm pmtiles:
 //
 //   pmtiles extract https://build.protomaps.com/<JJJJMMTT>.pmtiles karte.pmtiles --bbox=5.86,47.27,15.04,55.06 --maxzoom=15
 //
@@ -13,7 +18,7 @@
 // Server eines Betriebs —, meldet /karte/info `kacheln: false`, und die Seiten nehmen die Kacheln
 // von OpenStreetMap (steht so in der Datenschutzerklärung).
 
-import { createReadStream, existsSync, statSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -22,6 +27,79 @@ const BIBLIOTHEKEN = { 'leaflet.js': 'text/javascript; charset=utf-8', 'leaflet.
 
 export const kartenDatei = () => process.env.MONTIX_KARTE ?? join(ORDNER, 'karte.pmtiles');
 export const kachelnDa = () => existsSync(kartenDatei());
+/** Woher `node verwalten.mjs karte` die Datei holt. */
+export const KARTE_QUELLE = process.env.MONTIX_KARTE_QUELLE ?? 'https://montix.feif.space/karte/karte.pmtiles';
+
+const mb = (n) => `${(n / 1e6).toFixed(0)} MB`;
+
+/**
+ * Kartendatei von `quelle` holen: fortsetzbar (Teil liegt als `<ziel>.teil`), nichts tun, wenn der
+ * Stand (ETag) schon da ist. Die fertige Datei ersetzt die alte erst am Ende — der Dienst läuft
+ * währenddessen mit der alten weiter.
+ */
+export async function karteHolen({ quelle = KARTE_QUELLE, ziel = kartenDatei(), holen = fetch, melden = console.log } = {}) {
+  const kopf = await holen(quelle, { headers: { range: 'bytes=0-0' } });
+  if (kopf.status !== 206 && kopf.status !== 200) throw new Error(`${quelle} antwortet mit ${kopf.status}`);
+  const gesamt = Number(String(kopf.headers.get('content-range') ?? '').split('/')[1] ?? kopf.headers.get('content-length'));
+  const etag = kopf.headers.get('etag') ?? '';
+  await kopf.body?.cancel();
+  if (!Number.isFinite(gesamt) || gesamt <= 0) throw new Error('Größe der Kartendatei unbekannt');
+  const merk = `${ziel}.etag`;
+  // Gleiche Größe ohne Merkzettel (z. B. von Hand abgelegt): als aktuell nehmen und merken.
+  if (existsSync(ziel) && statSync(ziel).size === gesamt && !existsSync(merk)) writeFileSync(merk, etag);
+  if (existsSync(ziel) && statSync(ziel).size === gesamt && existsSync(merk) && readFileSync(merk, 'utf8') === etag) {
+    melden(`Kartendatei ist aktuell (${mb(gesamt)}).`);
+    return { neu: false, groesse: gesamt };
+  }
+  const teil = `${ziel}.teil`;
+  const teilMerk = `${teil}.etag`;
+  // Ein Teil von einem anderen Stand taugt nicht zum Fortsetzen.
+  if (existsSync(teil) && (!existsSync(teilMerk) || readFileSync(teilMerk, 'utf8') !== etag)) rmSync(teil);
+  writeFileSync(teilMerk, etag);
+  let start = existsSync(teil) ? statSync(teil).size : 0;
+  if (start > gesamt) {
+    rmSync(teil);
+    start = 0;
+  }
+  melden(start ? `Setze fort bei ${mb(start)} von ${mb(gesamt)} …` : `Lade ${mb(gesamt)} von ${quelle} …`);
+  if (start < gesamt) {
+    const r = await holen(quelle, { headers: { range: `bytes=${start}-`, ...(etag ? { 'if-range': etag } : {}) } });
+    if (r.status === 200) start = 0;
+    else if (r.status !== 206) throw new Error(`${quelle} antwortet mit ${r.status}`);
+    const aus = createWriteStream(teil, { flags: start ? 'a' : 'w' });
+    // Schreibfehler (Platte voll, Kontingent) als verständliche Meldung statt Absturz.
+    let schreibfehler = null;
+    aus.on('error', (e) => (schreibfehler = e));
+    let da = start;
+    let schritt = 0;
+    for await (const stueck of r.body) {
+      if (schreibfehler) break;
+      if (!aus.write(stueck)) await new Promise((ok) => (schreibfehler ? ok() : aus.once('drain', ok)));
+      if (schreibfehler) break;
+      da += stueck.length;
+      const p = Math.floor((da / gesamt) * 20);
+      if (p > schritt) {
+        schritt = p;
+        melden(`  ${p * 5} % (${mb(da)})`);
+      }
+    }
+    if (!schreibfehler) await new Promise((ok) => aus.end(ok));
+    if (schreibfehler) {
+      aus.destroy();
+      const voll = ['ENOSPC', 'EDQUOT'].includes(schreibfehler.code) || schreibfehler.errno === -122 || schreibfehler.errno === -28;
+      rmSync(teil, { force: true });
+      rmSync(teilMerk, { force: true });
+      throw new Error(voll ? `Kein Platz für ${mb(gesamt)} (Platte oder Kontingent voll). Der angefangene Teil ist gelöscht.` : `Schreiben ging nicht: ${schreibfehler.message}`);
+    }
+  }
+  const groesse = statSync(teil).size;
+  if (groesse !== gesamt) throw new Error(`Unvollständig (${mb(groesse)} von ${mb(gesamt)}) — noch einmal aufrufen, es geht dort weiter.`);
+  renameSync(teil, ziel);
+  writeFileSync(merk, etag);
+  rmSync(teilMerk, { force: true });
+  melden(`Fertig: ${ziel} (${mb(gesamt)}). Die Karten nutzen sie sofort, ohne Neustart.`);
+  return { neu: true, groesse: gesamt };
+}
 
 function senden(req, res, datei, typ, cache) {
   const st = statSync(datei);
@@ -63,7 +141,8 @@ export function karteWeg(req, res, pfad) {
   const name = pfad.slice('/karte/'.length);
   if (name === 'info') {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'max-age=300', 'access-control-allow-origin': '*' });
-    res.end(JSON.stringify({ kacheln: kachelnDa() }));
+    const da = kachelnDa();
+    res.end(JSON.stringify(da ? { kacheln: true, stand: statSync(kartenDatei()).mtime.toISOString().slice(0, 10) } : { kacheln: false, holen: 'node verwalten.mjs karte' }));
     return true;
   }
   if (BIBLIOTHEKEN[name]) {
