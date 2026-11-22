@@ -1,0 +1,5 @@
+# Adressdatei (mehrere GB) liegt nur auf dem Server, siehe adressen.mjs
+*.sqlite
+*.sqlite-*
+*.teil
+*.etag

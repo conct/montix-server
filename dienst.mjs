@@ -36,10 +36,13 @@ import { NachrichtFehler, nachrichtenweg } from './nachrichten.mjs';
 import { erstelleZahlung, ZahlFehler } from './zahlung.mjs';
 import { erstelleKasse, hatRecht, KassenDatei, KassenFehler } from './kasse.mjs';
 import { fehlerMelden } from './fehler.mjs';
-import { erstelleAdresssuche } from './adresse.mjs';
+import { adresseInfo, erstelleAdresssuche } from './adresse.mjs';
 import { darfDispo, erstelleOrtung, fuerFremdfahrer, lagekarteSeite, sendungSeite, TourFehler, tourenWeg } from './touren.mjs';
 import { sendungMail } from './mailvorlage.mjs';
 import { karteWeg } from './karte.mjs';
+import { datenPruefen } from './datenstand.mjs';
+import { adressenWeg } from './adressen.mjs';
+import { geraeteDb, melden as geraetMelden, liste as geraeteListe, seite as geraeteSeite } from './geraete.mjs';
 import { erstellePartner, PartnerFehler } from './partner.mjs';
 // Abo und Postfach nur auf dem zentralen Server; im öffentlichen Paket leere Fassungen — siehe anbieter.mjs.
 import { betriebUuid, erstelleAbos, erstellePostfach, KaufFehler } from './anbieter.mjs';
@@ -227,8 +230,8 @@ export function erstelleDienst(
   const fehlerZaehler = new Map();
   const testZaehler = new Map();
   const adressZaehler = new Map();
-  const adresseSuchen = erstelleAdresssuche({ holen: adresseHolen });
-  // Touren: Orte der Stopps (Photon) und Fahrzeiten (openrouteservice, wenn MONTIX_ORS_KEY gesetzt).
+  const adresseSuchen = erstelleAdresssuche();
+  // Touren: Orte der Stopps (eigene Adressdatei) und Fahrzeiten (openrouteservice, wenn MONTIX_ORS_KEY gesetzt).
   const ortung = erstelleOrtung({ holen: adresseHolen });
   const partner = erstellePartner({ speicher, holen: fernHolen });
   const server = createServer(async (req, res) => {
@@ -273,6 +276,23 @@ export function erstelleDienst(
 
       // Karten selbst ausgeliefert (Bibliotheken und Kacheln) — siehe karte.mjs.
       if (karteWeg(req, res, pfad)) return;
+      if (adressenWeg(req, res, pfad)) return;
+
+      // Geräte, die mit Montix funktionieren (Testdruck-Rückmeldungen) — siehe geraete.mjs.
+      if (req.method === 'POST' && pfad === '/geraete/meldung') {
+        const wo = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '').split(',')[0].trim();
+        const schluessel = `g|${new Date().toISOString().slice(0, 10)}|${wo}`;
+        const n = adressZaehler.get(schluessel) ?? 0;
+        if (n >= 50) throw new Fehler(429, 'Heute schon viele Meldungen von hier.');
+        adressZaehler.set(schluessel, n + 1);
+        const ok = geraetMelden(geraeteDb(speicher.speicherOrt ?? ordner), await koerper(req));
+        return antwort(res, ok ? 200 : 400, ok ? { ok: true } : { fehler: 'Angaben unvollständig' });
+      }
+      if (req.method === 'GET' && pfad === '/geraete.json') return antwort(res, 200, { geraete: geraeteListe(geraeteDb(speicher.speicherOrt ?? ordner)) });
+      if (req.method === 'GET' && pfad === '/geraete') {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'max-age=600' });
+        return res.end(geraeteSeite(geraeteDb(speicher.speicherOrt ?? ordner)));
+      }
 
       // Touren: öffentliche Seite für den Empfänger einer Lieferung — siehe touren.mjs.
       const sendung = pfad.match(/^\/sendung\/([A-Za-z0-9_-]+)$/);
@@ -308,6 +328,7 @@ export function erstelleDienst(
       if (pfad.startsWith('/objekt/') && (await raeume.oeffentlich(speicher, req, res, pfad, url, () => basisVon(req)))) return;
 
       // Adressvorschläge beim Tippen (auch ohne Anmeldung, auch Einzelplatz) — siehe adresse.mjs.
+      if (req.method === 'GET' && pfad === '/adresse/info') return antwort(res, 200, adresseInfo());
       if (req.method === 'GET' && pfad === '/adresse') {
         const wo = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '').split(',')[0].trim();
         const schluessel = `${new Date().toISOString().slice(0, 10)}|${wo}`;
@@ -795,6 +816,10 @@ export function erstelleDienst(
       if (++minuten % 60 === 0) {
         aufraeumen();
         void abos.auffrischen();
+        void postfach.rechnungenLauf?.();
+        // Eigener Server: neue Karten-/Adressdaten? Einmal am Tag (und nachts zum automatischen Holen stündlich).
+        const h = new Date().getHours();
+        if (!vertragPflicht && (minuten % 1440 === 60 || (process.env.MONTIX_DATEN_AUTO === 'an' && h >= 2 && h < 5))) void datenPruefen();
       }
     }, 60_000);
     t.unref?.();

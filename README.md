@@ -69,9 +69,11 @@ Geräte).
 | `MONTIX_SENDMAIL` | `/usr/sbin/sendmail` | Versand von Alarmen, Freigaben und Terminen; fehlt es, wird nur protokolliert |
 | `MONTIX_PRAEFIX` | leer | Wenn der Dienst unter einem Pfad läuft, z. B. `/montix` |
 | `MONTIX_PYTHON` | `python3` | Für das Postfach je Mitarbeiter (IMAP/SMTP über `mail-helfer.py`) |
-| `MONTIX_PHOTON` | `https://photon.komoot.io` | Adressvorschläge und Orte der Tour-Stopps (OpenStreetMap); eine eigene Photon-Instanz geht auch |
+| `MONTIX_ADRESSEN` | `adressen/adressen.sqlite` | Adressdatei für Adressvorschläge und Orte der Tour-Stopps (siehe unten) |
+| `MONTIX_ADRESSEN_QUELLE` | `https://montix.feif.space/adressen/adressen.sqlite` | Woher `node verwalten.mjs adressen` die Datei holt |
 | `MONTIX_ORS_KEY` | leer | Touren: Lkw-Fahrzeiten über openrouteservice; ohne Schlüssel schätzt der Server aus der Luftlinie |
 | `MONTIX_KARTE` | `karte/karte.pmtiles` | Kartendatei für die Touren-Karten (siehe unten) |
+| `MONTIX_DATEN_AUTO` | aus | `an`: neue Karten- und Adressdaten nachts selbst holen (sonst nur Hinweis) |
 | `MONTIX_KARTE_QUELLE` | `https://montix.feif.space/karte/karte.pmtiles` | Woher `node verwalten.mjs karte` die Datei holt |
 | `TSE_ANBIETER`, `TSE_API_KEY`, `TSE_API_SECRET`, `TSE_TSS_ID` | leer | Barkasse: Vorgabe für die TSE bei fiskaly (sonst in der App einrichten) |
 
@@ -79,9 +81,7 @@ Geräte).
 
 - **Push** über den Push-Dienst von Expo (`exp.host`): nur Titel und kurzer Text, etwa
   „Nachricht von Erika“.
-- **Adressvorschläge**: der eingetippte Text geht an Photon (`MONTIX_PHOTON`).
-- **Touren**: die Anschriften der Stopps (ohne Namen) an Photon; mit `MONTIX_ORS_KEY` zwei
-  Koordinatenpaare an openrouteservice. Ohne Kartendatei laden die Browser der Disposition und der
+- **Touren**: mit `MONTIX_ORS_KEY` zwei Koordinatenpaare an openrouteservice. Ohne Kartendatei laden die Browser der Disposition und der
   Empfänger die Kartenbilder von OpenStreetMap.
 - **Barkasse**: die Signaturanfragen an fiskaly, wenn eine TSE eingerichtet ist.
 - **Partnerbetriebe**: übernimmt Ihr Betrieb eine Tour einer anderen Firma, schickt der Server deren
@@ -91,6 +91,19 @@ Geräte).
 - Mails an Notfallkontakte, Kunden und Firmen gehen über Ihr `sendmail`.
 
 Sonst nichts: keine Statistik, keine Meldung an uns.
+
+## Adressen
+
+Adressvorschläge beim Tippen und die Orte der Tour-Stopps sucht der Server in einer eigenen
+Adressdatei (Adressen, Straßen und Orte aus OpenStreetMap, vorerst Deutschland). Kein fremder Dienst sieht dabei eine Anschrift. Die Datei
+ist mehrere GB groß und liegt deshalb nicht im Repository; holen Sie sie vom Montix-Server:
+
+```
+MONTIX_DATEN=./daten node verwalten.mjs adressen
+```
+
+Wie bei der Karte fortsetzbar und nur bei neuerem Stand; ohne Datei gibt es keine Vorschläge, und
+der Start des Servers weist darauf hin.
 
 ## Touren und Karten
 
@@ -106,6 +119,11 @@ MONTIX_DATEN=./daten node verwalten.mjs karte
 Der Befehl setzt einen abgebrochenen Download fort und lädt nur, wenn es einen neueren Stand gibt —
 monatlich per Cron aufgerufen, bleibt die Karte aktuell. Ohne Datei weisen der Start des Servers und
 die Live-Lage in der App darauf hin.
+
+**Neue Stände:** Ein eigener Server sieht beim Start und danach einmal am Tag beim Montix-Server nach,
+ob es neue Karten- oder Adressdaten gibt (nur die Kennung des Stands, kein Download). Neues steht im
+Protokoll, und der Verwalter sieht in der App unter Einstellungen → Abgleich einen Hinweis mit dem
+Befehl. Mit `MONTIX_DATEN_AUTO=an` holt der Server neue Stände selbst, nachts zwischen 2 und 5 Uhr.
 
 Selbst erzeugen (etwa für ein anderes Gebiet) geht mit dem
 Programm [pmtiles](https://github.com/protomaps/go-pmtiles/releases) aus dem täglichen Build von

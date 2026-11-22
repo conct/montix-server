@@ -6,11 +6,15 @@
 //                                                                 → Einladungscode (7 Tage einlösbar, einmal)
 //   node verwalten.mjs serverpaket <betrieb> an|aus               → gebuchtes Serverpaket (z. B. Mail-Takt einstellbar)
 //   node verwalten.mjs modul <betrieb> kasse <anzahl>             → gebuchte Kassen (Barkasse mit TSE, 0 = abbestellt)
+//   node verwalten.mjs nutzung <betrieb> [JJJJ-MM]                → Touren-Nutzung des Monats für die Rechnung (Fahrzeuge, Fremdfahrer-Touren)
 //   node verwalten.mjs karte                                      → Kartendatei für die Touren-Karten holen oder aktualisieren
+//   node verwalten.mjs adressen                                   → Adressdatei (Adresssuche, Orte der Tour-Stopps) holen oder aktualisieren
 //
 // Daten wie beim Dienst über MONTIX_DATEN (Vorgabe ./daten).
+import { adressDatei, adressenHolen, ADRESSEN_QUELLE } from './adressen.mjs';
 import { karteHolen, KARTE_QUELLE, kartenDatei } from './karte.mjs';
 import { MODULE, modulAnzahl, modulSetzen } from './module.mjs';
+import { tourenNutzung } from './touren.mjs';
 import { hatServerpaket, serverpaketSetzen } from './raeume.mjs';
 import { oeffneSpeicher } from './speicher.mjs';
 
@@ -25,6 +29,27 @@ if (befehl === 'karte') {
     console.log(`Fehler: ${e?.message ?? e}`);
     process.exit(1);
   }
+} else if (befehl === 'adressen') {
+  console.log(`Adressdatei (aus OpenStreetMap): ${ADRESSEN_QUELLE} → ${adressDatei()}`);
+  try {
+    await adressenHolen();
+  } catch (e) {
+    console.log(`Fehler: ${e?.message ?? e}`);
+    process.exit(1);
+  }
+} else if (befehl === 'nutzung' && rest[0]) {
+  const b = speicher.alleBetriebe().find((x) => x.id === rest[0]);
+  if (!b) {
+    console.log(`Kein Betrieb mit der Kennung ${rest[0]}.`);
+    process.exit(1);
+  }
+  const monat = /^\d{4}-\d{2}$/.test(rest[1] ?? '') ? rest[1] : new Date().toISOString().slice(0, 7);
+  const n = tourenNutzung(b.db, monat);
+  const eur = (x) => x.toFixed(2).replace('.', ',') + ' €';
+  console.log(`Touren ${b.name}, ${monat} (brutto):`);
+  console.log(`  ${n.fahrzeuge} Fahrzeuge × ${eur(n.jeFahrzeug)} = ${eur(n.fahrzeuge * n.jeFahrzeug)}${n.kennzeichen.length ? `  (${n.kennzeichen.join(', ')})` : ''}`);
+  for (const g of n.fremd) console.log(`  ${g.rolle === 'partner' ? 'Partner' : 'Fremdfahrer'} ${g.name}: ${g.touren} Touren = ${eur(g.betrag)}`);
+  console.log(`  Summe ${eur(n.summe)}`);
 } else if (befehl === 'betrieb' && rest[0]) {
   const id = speicher.betriebAnlegen(rest[0]);
   console.log(`Betrieb angelegt: ${rest[0]}\nKennung: ${id}\nNächster Schritt: node verwalten.mjs einladung ${id} "<Name>" verwalter`);
@@ -62,6 +87,6 @@ Das Gerät bleibt danach dauerhaft angemeldet, bis es abgemeldet oder die Person
   const n = modulAnzahl(b.db, rest[1]);
   console.log(`${MODULE[rest[1]]} für ${b.name}: ${n ? `${n} gebucht` : 'nicht gebucht'}.`);
 } else {
-  console.log('Aufruf: node verwalten.mjs betrieb "<Name>" | betrieb-loeschen <betrieb> [--ja] | einladung <betrieb> "<Name>" [verwalter|mitarbeiter] | serverpaket <betrieb> an|aus | modul <betrieb> kasse <anzahl> | karte');
+  console.log('Aufruf: node verwalten.mjs betrieb "<Name>" | betrieb-loeschen <betrieb> [--ja] | einladung <betrieb> "<Name>" [verwalter|mitarbeiter] | serverpaket <betrieb> an|aus | modul <betrieb> kasse <anzahl> | nutzung <betrieb> [JJJJ-MM] | karte | adressen');
   process.exit(1);
 }

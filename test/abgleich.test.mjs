@@ -14,6 +14,7 @@ const GEO = {
   ],
 };
 import { oeffneSpeicher } from '../speicher.mjs';
+import { testAdressen } from './adressen-hilfe.mjs';
 
 let server;
 let basis;
@@ -826,22 +827,29 @@ test('Terminmitteilung: Mail an den Kunden, Bestätigen und Ablehnen per Link, P
   assert.equal((await fetch(basis + '/t/tnichtdaxxxxxxxxxxx')).status, 404);
 });
 
-test('Adressvorschläge: ohne Anmeldung, Photon-Treffer als Anschrift, Zwischenspeicher', async () => {
+test('Adressvorschläge: ohne Anmeldung, aus der eigenen Adressdatei, kein fremder Dienst', async () => {
   const vorher = geodienst.length;
+  assert.deepEqual((await rufe('/adresse/info')).daten.daten, false);
+  testAdressen([
+    { art: 0, strasse: 'Hauptstraße', nr: '1', plz: '01097', ort: 'Dresden', lat: 51.02673, lon: 14.00482 },
+    { art: 1, strasse: 'Hauptstraße', plz: '01097', ort: 'Dresden', lat: 51.0268, lon: 14.0049 },
+    { art: 2, ort: 'Dresden', lat: 51.05, lon: 13.74 },
+    { art: 2, ort: 'Wien', land: 'at', lat: 48.2, lon: 16.37 },
+  ]);
   const r = await rufe('/adresse?q=' + encodeURIComponent('Hauptstr 1 Dresd'));
   assert.equal(r.status, 200, JSON.stringify(r.daten));
-  assert.deepEqual(r.daten.vorschlaege[0], { text: 'Hauptstraße 1, 01097 Dresden (Innere Neustadt)', strasse: 'Hauptstraße 1', plz: '01097', ort: 'Dresden', land: 'DE' });
-  assert.equal(r.daten.vorschlaege[1].text, 'Wien, AT');
-  assert.equal(r.daten.vorschlaege.length, 2, 'ohne Ort kein Vorschlag');
-  assert.ok(geodienst.at(-1).includes('lang=de'));
-  await rufe('/adresse?q=' + encodeURIComponent('hauptstr  1 dresd'));
-  assert.equal(geodienst.length, vorher + 1, 'zweite Anfrage aus dem Zwischenspeicher');
+  assert.deepEqual(r.daten.vorschlaege[0], { text: 'Hauptstraße 1, 01097 Dresden', strasse: 'Hauptstraße 1', plz: '01097', ort: 'Dresden', land: 'DE' });
+  assert.equal((await rufe('/adresse?q=wien')).daten.vorschlaege[0].text, 'Wien, AT');
+  // Hausnummer gibt es nicht → Straße.
+  assert.equal((await rufe('/adresse?q=' + encodeURIComponent('Hauptstraße 99 Dresden'))).daten.vorschlaege[0].text, 'Hauptstraße, 01097 Dresden');
   assert.deepEqual((await rufe('/adresse?q=ab')).daten, { vorschlaege: [] });
   const um = await rufe('/adresse?lat=51.02673&lon=14.00482');
   assert.equal(um.status, 200);
-  assert.ok(geodienst.at(-1).includes('/reverse?lat=51.0267&lon=14.0048'), geodienst.at(-1));
   assert.equal(um.daten.vorschlaege[0].strasse, 'Hauptstraße 1');
   assert.equal((await rufe('/adresse?lat=999&lon=1')).status, 400);
+  assert.deepEqual((await rufe('/adresse/info')).daten, { daten: true, stand: '2026-11-20', laender: ['de', 'at'], neu: false });
+  assert.equal(geodienst.length, vorher, 'kein Aufruf eines fremden Dienstes');
+  delete process.env.MONTIX_ADRESSEN;
 });
 
 test('Postfach: Eingang, Hinweis, Anmeldung, Auftrag, Helfer holt ab und meldet zurück', { skip: !ZENTRAL && 'nur auf dem zentralen Server' }, async () => {

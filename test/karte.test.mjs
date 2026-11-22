@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 
 import { erstelleDienst } from '../dienst.mjs';
+import { datenPruefen, datenStand } from '../datenstand.mjs';
 import { karteHolen } from '../karte.mjs';
 import { oeffneSpeicher } from '../speicher.mjs';
 
@@ -32,7 +33,7 @@ test('Karte: Bibliotheken vom eigenen Server, Kacheln mit Range, ohne Datei Hinw
   assert.equal((await fetch(`${basis}/karte/gibtsnicht.js`)).status, 401);
 
   process.env.MONTIX_KARTE = join(ordner, 'fehlt.pmtiles');
-  assert.deepEqual(await (await fetch(`${basis}/karte/info`)).json(), { kacheln: false, holen: 'node verwalten.mjs karte' });
+  assert.deepEqual(await (await fetch(`${basis}/karte/info`)).json(), { kacheln: false, neu: 'fehlt', holen: 'node verwalten.mjs karte' });
   assert.equal((await fetch(`${basis}/karte/karte.pmtiles`)).status, 404);
 
   writeFileSync(datei, Buffer.from('0123456789abcdef'));
@@ -67,4 +68,23 @@ test('Karte holen: vom Server laden, fortsetzen, bei gleichem Stand nichts tun',
   await karteHolen({ quelle: `${basis}/karte/karte.pmtiles`, ziel, melden: (m) => meldungen.push(m) });
   assert.ok(meldungen[0].startsWith('Setze fort'), meldungen[0]);
   assert.equal(readFileSync(ziel).length, 300_000);
+});
+
+test('Eigener Server: neue Kartendaten beim Montix-Server werden gemeldet, gleicher Stand nicht', async () => {
+  writeFileSync(datei, Buffer.alloc(5000, 1));
+  process.env.MONTIX_KARTE = datei;
+  process.env.MONTIX_KARTE_QUELLE = `${basis}/karte/karte.pmtiles`;
+  process.env.MONTIX_ADRESSEN_QUELLE = `${basis}/adressen/gibtsnicht.sqlite`;
+  const meldungen = [];
+  rmSync(`${datei}.etag`, { force: true });
+  await datenPruefen({ melden: (m) => meldungen.push(m), auto: false });
+  assert.equal(datenStand.karte.neu, 'neuer');
+  assert.ok(meldungen.some((m) => m.includes('node verwalten.mjs karte')));
+  assert.equal((await (await fetch(`${basis}/karte/info`)).json()).neu, 'neuer');
+  const etag = (await fetch(`${basis}/karte/karte.pmtiles`, { headers: { range: 'bytes=0-0' } })).headers.get('etag');
+  writeFileSync(`${datei}.etag`, etag);
+  await datenPruefen({ melden: () => {}, auto: false });
+  assert.equal(datenStand.karte.neu, false);
+  delete process.env.MONTIX_KARTE_QUELLE;
+  delete process.env.MONTIX_ADRESSEN_QUELLE;
 });

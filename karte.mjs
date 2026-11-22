@@ -22,6 +22,8 @@ import { createReadStream, createWriteStream, existsSync, readFileSync, renameSy
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { datenStand } from './datenstand-wert.mjs';
+
 const ORDNER = join(dirname(fileURLToPath(import.meta.url)), 'karte');
 const BIBLIOTHEKEN = { 'leaflet.js': 'text/javascript; charset=utf-8', 'leaflet.css': 'text/css; charset=utf-8', 'protomaps-leaflet.js': 'text/javascript; charset=utf-8' };
 
@@ -37,7 +39,12 @@ const mb = (n) => `${(n / 1e6).toFixed(0)} MB`;
  * Stand (ETag) schon da ist. Die fertige Datei ersetzt die alte erst am Ende — der Dienst läuft
  * währenddessen mit der alten weiter.
  */
-export async function karteHolen({ quelle = KARTE_QUELLE, ziel = kartenDatei(), holen = fetch, melden = console.log } = {}) {
+export function karteHolen(optionen = {}) {
+  return dateiHolen({ quelle: KARTE_QUELLE, ziel: kartenDatei(), was: 'Kartendatei', ...optionen });
+}
+
+/** Große Datei (Karte, Adressen) fortsetzbar holen; siehe karteHolen. */
+export async function dateiHolen({ quelle, ziel, was = 'Datei', holen = fetch, melden = console.log }) {
   const kopf = await holen(quelle, { headers: { range: 'bytes=0-0' } });
   if (kopf.status !== 206 && kopf.status !== 200) throw new Error(`${quelle} antwortet mit ${kopf.status}`);
   const gesamt = Number(String(kopf.headers.get('content-range') ?? '').split('/')[1] ?? kopf.headers.get('content-length'));
@@ -48,7 +55,7 @@ export async function karteHolen({ quelle = KARTE_QUELLE, ziel = kartenDatei(), 
   // Gleiche Größe ohne Merkzettel (z. B. von Hand abgelegt): als aktuell nehmen und merken.
   if (existsSync(ziel) && statSync(ziel).size === gesamt && !existsSync(merk)) writeFileSync(merk, etag);
   if (existsSync(ziel) && statSync(ziel).size === gesamt && existsSync(merk) && readFileSync(merk, 'utf8') === etag) {
-    melden(`Kartendatei ist aktuell (${mb(gesamt)}).`);
+    melden(`${was} ist aktuell (${mb(gesamt)}).`);
     return { neu: false, groesse: gesamt };
   }
   const teil = `${ziel}.teil`;
@@ -97,11 +104,11 @@ export async function karteHolen({ quelle = KARTE_QUELLE, ziel = kartenDatei(), 
   renameSync(teil, ziel);
   writeFileSync(merk, etag);
   rmSync(teilMerk, { force: true });
-  melden(`Fertig: ${ziel} (${mb(gesamt)}). Die Karten nutzen sie sofort, ohne Neustart.`);
+  melden(`Fertig: ${ziel} (${mb(gesamt)}). Der Dienst nutzt sie sofort, ohne Neustart.`);
   return { neu: true, groesse: gesamt };
 }
 
-function senden(req, res, datei, typ, cache) {
+export function dateiSenden(req, res, datei, typ, cache) {
   const st = statSync(datei);
   const kopf = {
     'content-type': typ,
@@ -142,11 +149,12 @@ export function karteWeg(req, res, pfad) {
   if (name === 'info') {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'max-age=300', 'access-control-allow-origin': '*' });
     const da = kachelnDa();
-    res.end(JSON.stringify(da ? { kacheln: true, stand: statSync(kartenDatei()).mtime.toISOString().slice(0, 10) } : { kacheln: false, holen: 'node verwalten.mjs karte' }));
+    const neu = datenStand.karte?.neu ?? (da ? false : 'fehlt');
+    res.end(JSON.stringify(da ? { kacheln: true, stand: statSync(kartenDatei()).mtime.toISOString().slice(0, 10), neu, ...(neu ? { holen: 'node verwalten.mjs karte' } : {}) } : { kacheln: false, neu, holen: 'node verwalten.mjs karte' }));
     return true;
   }
   if (BIBLIOTHEKEN[name]) {
-    senden(req, res, join(ORDNER, name), BIBLIOTHEKEN[name], 'public, max-age=604800');
+    dateiSenden(req, res, join(ORDNER, name), BIBLIOTHEKEN[name], 'public, max-age=604800');
     return true;
   }
   if (name === 'karte.pmtiles') {
@@ -155,11 +163,18 @@ export function karteWeg(req, res, pfad) {
       res.end('Keine Kartendaten auf diesem Server');
       return true;
     }
-    senden(req, res, kartenDatei(), 'application/octet-stream', 'public, max-age=86400');
+    dateiSenden(req, res, kartenDatei(), 'application/octet-stream', 'public, max-age=86400');
     return true;
   }
   return false;
 }
+
+/**
+ * Fahrzeugsymbole (Lkw, Zug, Schiff), gleiche Zeichnung wie src/features/touren/symbole.ts. Definiert
+ * im Browser `fz(mittel, farbe, rand)` → L.divIcon. Bei Änderungen beide anpassen.
+ */
+export const FAHRZEUG_JS = `var FZ={lkw:'<path d="M1.5 6h12.5v10H1.5z M14 9h4.6l3.9 4.2V16H14z"/><circle cx="5.5" cy="17.5" r="2.2"/><circle cx="17.5" cy="17.5" r="2.2"/>',bahn:'<path fill-rule="evenodd" d="M6.5 2.5h11a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3h-11a3 3 0 0 1-3-3v-10a3 3 0 0 1 3-3zM6 5.5v4.5h12V5.5zM7.5 13.5a1.3 1.3 0 1 0 0 .1zM16.5 13.5a1.3 1.3 0 1 0 0 .1z"/><path d="M7.5 19h2.2l-1.8 3H5.4zM14.3 19h2.2l2.1 3h-2.5z"/>',schiff:'<path d="M1.5 14h21l-3.4 6.5H4.9z M5 9h4v4H5z M10 9h4v4h-4z M15 9h4v4h-4z M10 4.5h4v4h-4z"/>'};
+function fz(v,f,r){return L.divIcon({className:'',iconSize:[32,32],iconAnchor:[16,16],tooltipAnchor:[0,-14],html:'<div style="width:32px;height:32px;border-radius:50%;background:'+f+';border:3px solid '+r+';box-sizing:border-box;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 4px rgba(0,0,0,.35)"><svg viewBox="0 0 24 24" width="18" height="18" fill="#fff">'+(FZ[v]||FZ.lkw)+'</svg></div>'})}`;
 
 /**
  * Script-Teil für eine Seite mit Leaflet-Karte `m` (schon erzeugt): eigene Kacheln, wenn der Server

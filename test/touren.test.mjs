@@ -3,7 +3,8 @@ import { after, before, test } from 'node:test';
 
 import { erstelleDienst } from '../dienst.mjs';
 import { oeffneSpeicher } from '../speicher.mjs';
-import { stand } from '../touren.mjs';
+import { stand, tourenNutzung } from '../touren.mjs';
+import { testAdressen } from './adressen-hilfe.mjs';
 
 let server;
 let basis;
@@ -11,11 +12,16 @@ let speicher;
 let betrieb;
 const post = [];
 
-// Photon-Fänger: jede Adresse liegt in Dresden, „Leipzig“ in Leipzig.
-const geo = async (u) => ({
-  ok: true,
-  json: async () => ({ features: [{ geometry: { coordinates: String(u).includes('Leipzig') ? [12.37, 51.34] : [13.74, 51.05] }, properties: {} }] }),
-});
+// Adressdatei: Lager in Dresden, Kunde in Leipzig. Fremde Dienste (openrouteservice) gibt es im Test nicht.
+const geo = async () => {
+  throw new Error('kein fremder Dienst im Test');
+};
+testAdressen([
+  { art: 0, strasse: 'Hafenstraße', nr: '1', plz: '01067', ort: 'Dresden', lat: 51.05, lon: 13.74 },
+  { art: 0, strasse: 'Markt', nr: '1', plz: '04109', ort: 'Leipzig', lat: 51.34, lon: 12.37 },
+  { art: 2, ort: 'Dresden', lat: 51.05, lon: 13.74 },
+  { art: 2, ort: 'Leipzig', lat: 51.34, lon: 12.37 },
+]);
 
 before(async () => {
   speicher = oeffneSpeicher(':memory:');
@@ -214,4 +220,32 @@ test('Kartenlink der Disposition: Seite und Lage ohne Anmeldung, nur für die Di
   const db = speicher.pruefe(dispo.token).db;
   db.prepare('update mitarbeiter set aktiv = 0 where id = ?').run(dispo.mitarbeiter.id);
   assert.equal((await fetch(`${basis}${pfad}/lage`)).status, 404);
+});
+
+test('Nutzung für die Rechnung: Fahrzeuge je Kennzeichen, Fremdfahrer je Tour mit Deckel', async () => {
+  const sp = oeffneSpeicher(':memory:');
+  const b = sp.betriebAnlegen('Abrechnung');
+  const db = sp.alleBetriebe().find((x) => x.id === b).db;
+  const dispo = sp.einladen(b, 'Dispo', 'verwalter').mitarbeiter;
+  const fremd = sp.einladen(b, 'Fremd Fritz', 'fremdfahrer').mitarbeiter;
+  const partner = sp.einladen(b, 'Partner GmbH', 'partner').mitarbeiter;
+  const jetzt = new Date().toISOString();
+  const tour = (id, extra) => ({ sammlung: 'touren', id, geaendert: jetzt, geloescht: false, inhalt: { id, datum: '2026-11-05', name: id, stopps: [], ...extra } });
+  const start = (tourId) => ({ sammlung: 'tourereignisse', id: `e_${tourId}`, geaendert: jetzt, geloescht: false, inhalt: { id: `e_${tourId}`, tourId, art: 'tour_start', zeit: jetzt, von: dispo } });
+  sp.schreiben(db, dispo, [
+    tour('a', { kennzeichen: 'DD-MX 1' }), start('a'),
+    tour('b', { kennzeichen: 'dd mx1' }), start('b'), // gleiches Fahrzeug
+    tour('c', { kennzeichen: 'DD-MX 2' }), // nie begonnen → zählt nicht
+    tour('d', { kennzeichen: 'MS Elbe', verkehrsmittel: 'schiff' }), start('d'), // Schiff mit Kapitän zählt wie ein Lkw
+    tour('e', { fahrerId: 'ma_ohne' }), start('e'), // ohne Kennzeichen: je Fahrer
+    ...Array.from({ length: 8 }, (_, i) => tour(`f${i}`, { fahrerId: fremd })),
+    tour('p1', { partnerId: partner }), tour('p2', { partnerId: partner }),
+    tour('dez', { kennzeichen: 'DD-MX 9', datum: '2026-12-01' }), start('dez'),
+  ]);
+  const n = tourenNutzung(db, '2026-11');
+  assert.equal(n.fahrzeuge, 3);
+  assert.deepEqual(n.kennzeichen, ['DDMX1', 'MSELBE']);
+  assert.equal(n.jeFahrzeug, 7.99);
+  assert.deepEqual(n.fremd.map((g) => [g.name, g.touren, g.betrag]), [['Fremd Fritz', 8, 2.99], ['Partner GmbH', 2, 0.98]]);
+  assert.equal(n.summe, 27.94);
 });

@@ -20,7 +20,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 
 import { hatRecht } from './kasse.mjs';
-import { kachelLayerJs, kachelnDa } from './karte.mjs';
+import { ortVon, suchen } from './adressen.mjs';
+import { FAHRZEUG_JS, kachelLayerJs, kachelnDa } from './karte.mjs';
 
 export const RECHT_DISPO = 'recht:dispo';
 export const darfDispo = (m) => m.rolle === 'verwalter' || hatRecht(m, RECHT_DISPO);
@@ -55,7 +56,7 @@ function tabellen(db) {
     create index if not exists tour_orte_tour on tour_orte (tour, zeit);
     create table if not exists tour_letzte (tour text primary key, mitarbeiter text, zeit text not null, lat real not null, lon real not null, genau real, quelle text);
     create table if not exists tour_links (pruef text primary key, tour text not null, stopp text not null, erstellt text not null, gesendet text);
-    create table if not exists geocode (adresse text primary key, lat real, lon real, zeit text not null);
+    drop table if exists geocode;
     create table if not exists tour_karten (pruef text primary key, mitarbeiter text not null, erstellt text not null, bis text not null);
   `);
 }
@@ -170,35 +171,24 @@ export function stand(tour, ereignisse) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Orte der Stopps (Koordinaten aus der App, sonst über Photon) und Ankunftszeit
+// Orte der Stopps (Koordinaten aus der App, sonst aus der eigenen Adressdatei) und Ankunftszeit
 
-function adressText(s) {
+/** Anschrift eines Stopps → Koordinate aus adressen.mjs (kein fremder Dienst). */
+function anschriftOrt(s) {
   const a = s.adresse ?? {};
-  return typeof a === 'string' ? a : [a.line1, [a.postalCode ?? a.plz, a.city ?? a.ort].filter(Boolean).join(' '), a.countryCode && a.countryCode !== 'DE' ? a.countryCode : ''].filter(Boolean).join(', ');
+  if (typeof a === 'string') return a.trim().length >= 4 ? (suchen(a, { tippen: false, grenze: 1 })[0] ?? null) : null;
+  return ortVon({ strasse: a.line1 ?? '', plz: a.postalCode ?? a.plz ?? '', ort: a.city ?? a.ort ?? '', land: a.countryCode ?? undefined });
 }
 
-export function erstelleOrtung({ holen = fetch, photon = process.env.MONTIX_PHOTON ?? 'https://photon.komoot.io', orsSchluessel = process.env.MONTIX_ORS_KEY } = {}) {
-  async function geocode(db, text) {
-    if (!text || text.length < 4) return null;
-    tabellen(db);
-    const z = db.prepare('select lat, lon from geocode where adresse = ?').get(text);
-    if (z) return z.lat == null ? null : { lat: z.lat, lon: z.lon };
-    let ort = null;
-    try {
-      const r = await holen(`${photon}/api/?q=${encodeURIComponent(text)}&limit=1&lang=de`);
-      const j = r.ok ? await r.json() : null;
-      const c = j?.features?.[0]?.geometry?.coordinates;
-      if (Array.isArray(c) && Number.isFinite(c[0]) && Number.isFinite(c[1])) ort = { lat: c[1], lon: c[0] };
-    } catch {
-      return null; // ohne Netz: beim nächsten Mal noch einmal versuchen
-    }
-    db.prepare('insert or replace into geocode values (?, ?, ?, ?)').run(text, ort?.lat ?? null, ort?.lon ?? null, new Date().toISOString());
-    return ort;
+export function erstelleOrtung({ holen = fetch, orsSchluessel = process.env.MONTIX_ORS_KEY } = {}) {
+  async function geocode(_db, s) {
+    const t = anschriftOrt(s);
+    return t ? { lat: t.lat, lon: t.lon } : null;
   }
 
   async function stoppOrt(db, s) {
     if (ortOk(s.ort)) return s.ort;
-    return geocode(db, adressText(s));
+    return geocode(db, s);
   }
 
   /** Fahrzeit in Sekunden: openrouteservice (Lkw), sonst Luftlinie × Umweg bei Lkw-Schnitt. */
@@ -463,7 +453,7 @@ export async function sendungSeite(speicher, ortung, schluessel) {
 
     const kartenTeil = karte
       ? `<div id="karte"></div><link rel="stylesheet" href="../karte/leaflet.css"><script src="../karte/leaflet.js"></script>${kachelnDa() ? '<script src="../karte/protomaps-leaflet.js"></script>' : ''}
-<script>(function(){var m=L.map('karte',{zoomControl:false,attributionControl:true});${kachelLayerJs('..')}var a=[${letzte.lat},${letzte.lon}],z=[${ziel.lat},${ziel.lon}];L.circleMarker(a,{radius:9,color:'#1d4ed8',fillOpacity:1}).addTo(m).bindTooltip('Fahrzeug');L.circleMarker(z,{radius:9,color:'#16a34a',fillOpacity:1}).addTo(m).bindTooltip('Sie');m.fitBounds([a,z],{padding:[30,30]});})();</script>`
+<script>(function(){var m=L.map('karte',{zoomControl:false,attributionControl:true});${kachelLayerJs('..')}var a=[${letzte.lat},${letzte.lon}],z=[${ziel.lat},${ziel.lon}];${FAHRZEUG_JS}L.marker(a,{icon:fz('${tour.verkehrsmittel ?? 'lkw'}','#208AEF','#fff')}).addTo(m).bindTooltip('Fahrzeug');L.circleMarker(z,{radius:9,color:'#16a34a',fillOpacity:1}).addTo(m).bindTooltip('Sie');m.fitBounds([a,z],{padding:[30,30]});})();</script>`
       : '';
 
     const offen = s.zustand !== 'erledigt';
@@ -522,7 +512,7 @@ export async function lagekarteSeite(speicher, ortung, schluessel, nurLage) {
           stand: new Date().toISOString(),
           touren: touren.map((x) => {
             const n = x.stopps.find((y) => y.id === x.naechster);
-            return { name: x.name, fahrer: x.fahrer, fahrzeug: x.fahrzeug, status: x.status, verspaetet: x.verspaetet, stoerung: x.stoerung ?? null, erledigt: x.erledigt, gesamt: x.gesamt, position: x.position, naechster: n ? { name: n.name, ankunft: n.ankunft } : null };
+            return { name: x.name, fahrer: x.fahrer, fahrzeug: x.fahrzeug, verkehrsmittel: x.verkehrsmittel, status: x.status, verspaetet: x.verspaetet, stoerung: x.stoerung ?? null, erledigt: x.erledigt, gesamt: x.gesamt, position: x.position, naechster: n ? { name: n.name, ankunft: n.ankunft } : null };
           }),
         },
       };
@@ -538,6 +528,7 @@ var m=L.map('karte',{zoomControl:false}).setView([51.1,10.4],6);L.control.zoom({
 ${kachelLayerJs('..')}
 var g=L.layerGroup().addTo(m),erst=true;
 var F={geplant:'#8A929C',faehrt:'#208AEF',beim_kunden:'#7B4FD6',pause:'#E0A100',stoerung:'#C0392B',fertig:'#2E7D32'};
+${FAHRZEUG_JS}
 var T={geplant:'Geplant',faehrt:'Unterwegs',beim_kunden:'Beim Kunden',pause:'Pause',stoerung:'Störung',fertig:'Fertig'};
 function e(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 function uhr(i){return new Date(i).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})}
@@ -548,7 +539,7 @@ var z=['<b>'+e(x.fahrer||x.name)+'</b>'+(x.fahrzeug?' · '+e(x.fahrzeug):''),e(T
 if(x.stoerung)z.push('Störung: '+e(x.stoerung));
 if(x.naechster)z.push('Nächster: '+e(x.naechster.name)+(x.naechster.ankunft?' · ca. '+uhr(x.naechster.ankunft):''));
 z.push('Position '+uhr(x.position.zeit));
-L.circleMarker(q,{radius:10,weight:3,color:x.verspaetet?F.stoerung:'#fff',fillColor:F[x.status]||'#208AEF',fillOpacity:.95}).bindTooltip(z.join('<br>'),{direction:'top'}).addTo(g);});
+L.marker(q,{icon:fz(x.verkehrsmittel,F[x.status]||'#208AEF',x.verspaetet?F.stoerung:'#fff')}).bindTooltip(z.join('<br>'),{direction:'top'}).addTo(g);});
 document.getElementById('leer').hidden=p.length>0;
 document.getElementById('stand').textContent='Stand '+uhr(d.stand);
 if(erst&&p.length){erst=false;if(p.length===1)m.setView(p[0],12);else m.fitBounds(L.latLngBounds(p),{padding:[40,40],maxZoom:13});}
@@ -558,4 +549,57 @@ laden();setInterval(laden,30000);
     };
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Nutzung für die Abrechnung des Moduls Touren (Preise: docs/ideen.md „Preise für Module“, 22.11.2026)
+
+/** Brutto je Monat. Staffel je Fahrzeug nach Anzahl der Fahrzeuge im Monat. */
+export const TOUREN_PREISE = { fahrzeug: [[200, 4.99], [50, 5.99], [0, 7.99]], fremdJeTour: 0.49, fremdDeckel: 2.99 };
+
+const kennzeichenNorm = (k) => String(k ?? '').toUpperCase().replace(/[^A-Z0-9ÄÖÜ]/g, '');
+const cent = (x) => Math.round(x * 100) / 100;
+
+/**
+ * Nutzung eines Monats (JJJJ-MM): Fahrzeuge = verschiedene Kennzeichen (bei Bahn Zugnummer, bei Schiff
+ * Schiff/Container; ohne Angabe je Fahrer) aus eigenen Touren, die begonnen wurden. Touren an Fremdfahrer
+ * und Partnerbetriebe zählen je Gast als Tour (0,49 €, höchstens 2,99 € je Gast und Monat).
+ */
+export function tourenNutzung(db, monat) {
+  tabellen(db);
+  const touren = db
+    .prepare("select inhalt from daten where sammlung = 'touren' and geloescht = 0 and json_extract(inhalt, '$.datum') like ?")
+    .all(`${monat}-%`)
+    .map((z) => JSON.parse(z.inhalt));
+  const gaeste = new Map(db.prepare("select id, name, rolle from mitarbeiter where rolle in ('fremdfahrer', 'partner')").all().map((m) => [m.id, m]));
+  const begonnen = new Set(
+    db
+      .prepare("select distinct json_extract(inhalt, '$.tourId') as t from daten where sammlung = 'tourereignisse' and geloescht = 0 and json_extract(inhalt, '$.art') = 'tour_start'")
+      .all()
+      .map((z) => z.t),
+  );
+  const fahrzeuge = new Set();
+  const fremd = new Map();
+  for (const t of touren) {
+    const gast = gaeste.get(t.partnerId) ?? gaeste.get(t.fahrerId);
+    if (gast) {
+      fremd.set(gast.id, { id: gast.id, name: gast.name, rolle: gast.rolle, touren: (fremd.get(gast.id)?.touren ?? 0) + 1 });
+      continue;
+    }
+    if (!begonnen.has(t.id)) continue;
+    const k = kennzeichenNorm(t.kennzeichen);
+    fahrzeuge.add(k ? `kz:${k}` : `fahrer:${t.fahrerId ?? t.id}`);
+  }
+  const n = fahrzeuge.size;
+  const jeFahrzeug = TOUREN_PREISE.fahrzeug.find(([ab]) => n >= ab)[1];
+  const fremdListe = [...fremd.values()].map((g) => ({ ...g, betrag: cent(Math.min(g.touren * TOUREN_PREISE.fremdJeTour, TOUREN_PREISE.fremdDeckel)) }));
+  const summe = cent(n * jeFahrzeug + fremdListe.reduce((x, g) => x + g.betrag, 0));
+  return {
+    monat,
+    fahrzeuge: n,
+    kennzeichen: [...fahrzeuge].filter((f) => f.startsWith('kz:')).map((f) => f.slice(3)).sort(),
+    jeFahrzeug,
+    fremd: fremdListe.sort((a, b) => b.touren - a.touren),
+    summe,
+  };
 }
