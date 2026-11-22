@@ -9,19 +9,31 @@
 //   node verwalten.mjs nutzung <betrieb> [JJJJ-MM]                → Touren-Nutzung des Monats für die Rechnung (Fahrzeuge, Fremdfahrer-Touren)
 //   node verwalten.mjs karte                                      → Kartendatei für die Touren-Karten holen oder aktualisieren
 //   node verwalten.mjs adressen                                   → Adressdatei (Adresssuche, Orte der Tour-Stopps) holen oder aktualisieren
+//   node verwalten.mjs hilfe                                      → offene Hilfe-Lücken als JSON (hilfe.mjs)
+//   node verwalten.mjs hilfe-erledigt <schluessel> …              → Lücken abhaken, sobald ein eigener Text ausgeliefert ist
 //
 // Daten wie beim Dienst über MONTIX_DATEN (Vorgabe ./daten).
 import { adressDatei, adressenHolen, ADRESSEN_QUELLE } from './adressen.mjs';
 import { karteHolen, KARTE_QUELLE, kartenDatei } from './karte.mjs';
 import { MODULE, modulAnzahl, modulSetzen } from './module.mjs';
 import { tourenNutzung } from './touren.mjs';
+import { geraeteDb } from './geraete.mjs';
+import { lueckeErledigt, lueckenListe } from './hilfe.mjs';
 import { hatServerpaket, serverpaketSetzen } from './raeume.mjs';
 import { oeffneSpeicher } from './speicher.mjs';
 
 const speicher = oeffneSpeicher(process.env.MONTIX_DATEN ?? './daten');
 const [befehl, ...rest] = process.argv.slice(2);
 
-if (befehl === 'karte') {
+const ordner = speicher.speicherOrt ?? process.env.MONTIX_DATEN ?? './daten';
+
+if (befehl === 'hilfe') {
+  const offen = lueckenListe(geraeteDb(ordner)).filter((l) => !l.erledigt);
+  console.log(JSON.stringify(offen.map(({ schluessel, id, titel, pfad, sprache, plattform, anzahl, erst, zuletzt }) => ({ schluessel, id, titel, pfad, sprache, plattform, anzahl, erst, zuletzt })), null, 1));
+} else if (befehl === 'hilfe-erledigt' && rest.length) {
+  for (const s of rest) lueckeErledigt(geraeteDb(ordner), s);
+  console.log(`${rest.length} abgehakt.`);
+} else if (befehl === 'karte') {
   console.log(`Kartendatei (Deutschland, aus OpenStreetMap): ${KARTE_QUELLE} → ${kartenDatei()}`);
   try {
     await karteHolen();
@@ -87,6 +99,6 @@ Das Gerät bleibt danach dauerhaft angemeldet, bis es abgemeldet oder die Person
   const n = modulAnzahl(b.db, rest[1]);
   console.log(`${MODULE[rest[1]]} für ${b.name}: ${n ? `${n} gebucht` : 'nicht gebucht'}.`);
 } else {
-  console.log('Aufruf: node verwalten.mjs betrieb "<Name>" | betrieb-loeschen <betrieb> [--ja] | einladung <betrieb> "<Name>" [verwalter|mitarbeiter] | serverpaket <betrieb> an|aus | modul <betrieb> kasse <anzahl> | nutzung <betrieb> [JJJJ-MM] | karte | adressen');
+  console.log('Aufruf: node verwalten.mjs betrieb "<Name>" | betrieb-loeschen <betrieb> [--ja] | einladung <betrieb> "<Name>" [verwalter|mitarbeiter] | serverpaket <betrieb> an|aus | modul <betrieb> kasse <anzahl> | nutzung <betrieb> [JJJJ-MM] | karte | adressen | hilfe | hilfe-erledigt <schluessel> …');
   process.exit(1);
 }

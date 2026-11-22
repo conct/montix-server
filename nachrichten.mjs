@@ -4,7 +4,7 @@
 //
 //   GET  /kollegen                         → [{ id, name, rolle }]       (aktive Mitarbeiter)
 //   GET  /nachrichten?seit=<rev>           → { rev, nachrichten[] }      (ohne Aufnahme, nur Kennzeichen)
-//   POST /nachricht {an, text?, audio?, dauerMs?}  → { id, rev }         an = Mitarbeiter-ID oder '*'
+//   POST /nachricht {an, text?, audio?, dauerMs?, sprache?}  → { id, rev }         an = Mitarbeiter-ID oder '*'
 //   GET  /nachricht/<id>/audio             → { daten }                   Base64 der Aufnahme
 //   POST /nachricht/<id>/loeschen          → { ok }                      nur Absender: für alle löschen
 //
@@ -32,10 +32,12 @@ const tabelle = (db) => {
     );
     create index if not exists nachrichten_an on nachrichten (an, rev);
   `);
-  try {
-    db.exec('alter table nachrichten add column geloescht integer not null default 0');
-  } catch {
-    // schon vorhanden
+  for (const spalte of ['geloescht integer not null default 0', 'sprache text']) {
+    try {
+      db.exec(`alter table nachrichten add column ${spalte}`);
+    } catch {
+      // schon vorhanden
+    }
   }
 };
 
@@ -75,6 +77,7 @@ export async function nachrichtenweg(methode, pfad, url, wer, koerper, nachPost 
         text: z.text ?? '',
         audio: !!z.audio,
         dauerMs: z.dauer_ms ?? 0,
+        ...(z.sprache ? { sprache: z.sprache } : {}),
         zeit: z.zeit,
         ...(z.geloescht ? { geloescht: true } : {}),
       })),
@@ -82,7 +85,7 @@ export async function nachrichtenweg(methode, pfad, url, wer, koerper, nachPost 
   }
 
   if (methode === 'POST' && pfad === '/nachricht') {
-    const { an, text, audio, dauerMs } = await koerper();
+    const { an, text, audio, dauerMs, sprache } = await koerper();
     if (typeof an !== 'string' || (an !== '*' && !db.prepare('select 1 from mitarbeiter where id = ? and aktiv = 1').get(an))) {
       throw new NachrichtFehler(400, 'Unbekannter Empfänger');
     }
@@ -92,8 +95,8 @@ export async function nachrichtenweg(methode, pfad, url, wer, koerper, nachPost 
     if (a && (a.length > AUDIO_MAX || !/^[A-Za-z0-9+/=]+$/.test(a))) throw new NachrichtFehler(413, 'Sprachnachricht zu lang');
     const id = `nm_${randomBytes(8).toString('hex')}`;
     const r = db
-      .prepare('insert into nachrichten (id, von, an, text, audio, dauer_ms, zeit) values (?, ?, ?, ?, ?, ?, ?)')
-      .run(id, ich, an, t || null, a, Number.isFinite(dauerMs) ? Math.round(dauerMs) : null, new Date().toISOString());
+      .prepare('insert into nachrichten (id, von, an, text, audio, dauer_ms, zeit, sprache) values (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, ich, an, t || null, a, Number.isFinite(dauerMs) ? Math.round(dauerMs) : null, new Date().toISOString(), typeof sprache === 'string' && /^[a-z]{2}$/.test(sprache) ? sprache : null);
     // Push an die Empfänger: an alle (ohne Absender und ohne Angehörige) oder an die eine Person.
     const ziele = an === '*' ? db.prepare("select id from mitarbeiter where aktiv = 1 and rolle != 'empfaenger' and id != ?").all(ich).map((z) => z.id) : [an];
     nachPost(ziele, wer.mitarbeiter.name, t ? t.slice(0, 140) : 'Sprachnachricht');

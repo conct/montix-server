@@ -42,6 +42,7 @@ import { sendungMail } from './mailvorlage.mjs';
 import { karteWeg } from './karte.mjs';
 import { datenPruefen } from './datenstand.mjs';
 import { adressenWeg } from './adressen.mjs';
+import { lueckeMelden } from './hilfe.mjs';
 import { geraeteDb, melden as geraetMelden, liste as geraeteListe, seite as geraeteSeite } from './geraete.mjs';
 import { erstellePartner, PartnerFehler } from './partner.mjs';
 // Abo und Postfach nur auf dem zentralen Server; im öffentlichen Paket leere Fassungen — siehe anbieter.mjs.
@@ -286,6 +287,16 @@ export function erstelleDienst(
         if (n >= 50) throw new Fehler(429, 'Heute schon viele Meldungen von hier.');
         adressZaehler.set(schluessel, n + 1);
         const ok = geraetMelden(geraeteDb(speicher.speicherOrt ?? ordner), await koerper(req));
+        return antwort(res, ok ? 200 : 400, ok ? { ok: true } : { fehler: 'Angaben unvollständig' });
+      }
+      // Hilfe ohne eigenen Text, gemeldet aus dem Hilfemodus der App — siehe hilfe.mjs.
+      if (req.method === 'POST' && pfad === '/hilfe/luecke') {
+        const wo = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '').split(',')[0].trim();
+        const schluessel = `h|${new Date().toISOString().slice(0, 10)}|${wo}`;
+        const n = adressZaehler.get(schluessel) ?? 0;
+        if (n >= 100) throw new Fehler(429, 'Heute schon viele Meldungen von hier.');
+        adressZaehler.set(schluessel, n + 1);
+        const ok = lueckeMelden(geraeteDb(speicher.speicherOrt ?? ordner), await koerper(req), senden);
         return antwort(res, ok ? 200 : 400, ok ? { ok: true } : { fehler: 'Angaben unvollständig' });
       }
       if (req.method === 'GET' && pfad === '/geraete.json') return antwort(res, 200, { geraete: geraeteListe(geraeteDb(speicher.speicherOrt ?? ordner)) });
