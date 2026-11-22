@@ -9,6 +9,8 @@
 //   POST /touren/link        {tour, stopp}          → Link für den Empfänger (/sendung/<schluessel>)
 //   POST /touren/benachrichtigen {tour, stopp, email, name?} → Link per E-Mail an den Empfänger
 //   GET  /sendung/<schluessel>                      → öffentliche Seite für den Empfänger (ohne Konto)
+//   POST /touren/kartenlink                         → Einmal-Link zur Karte aller Fahrzeuge (Disposition, 12 h)
+//   GET  /lagekarte/<schluessel>[/lage]              → schlanke Kartenseite dazu (App öffnet sie als Fenster)
 //
 // Positionen kommen heute vom Handy des Fahrers (bei offener App, ab Fassung 9 auch im
 // Hintergrund während der Tour); später zusätzlich aus einer Telematik (Adapter je Anbieter).
@@ -35,6 +37,8 @@ const NACHWEIS_TAGE = 30;
 export const ORTE_TAGE = 30;
 /** Empfänger-Links: nach dieser Frist ab Erstellung gelöscht (der Nachweis gilt ohnehin nur 30 Tage nach Zustellung). */
 export const LINK_TAGE = 90;
+/** Kartenlink der Disposition (App → Fenster über der App): so lange gültig. */
+const KARTENLINK_STUNDEN = 12;
 /** Karte für den Empfänger erst, wenn der Lkw zu ihm unterwegs ist und höchstens so weit weg. */
 const KARTE_AB_M = 25_000;
 
@@ -52,6 +56,7 @@ function tabellen(db) {
     create table if not exists tour_letzte (tour text primary key, mitarbeiter text, zeit text not null, lat real not null, lon real not null, genau real, quelle text);
     create table if not exists tour_links (pruef text primary key, tour text not null, stopp text not null, erstellt text not null, gesendet text);
     create table if not exists geocode (adresse text primary key, lat real, lon real, zeit text not null);
+    create table if not exists tour_karten (pruef text primary key, mitarbeiter text not null, erstellt text not null, bis text not null);
   `);
 }
 
@@ -61,6 +66,7 @@ function aufraeumen(db) {
   db.prepare('delete from tour_orte where zeit < ?').run(vor(ORTE_TAGE));
   db.prepare('delete from tour_letzte where zeit < ?').run(vor(ORTE_TAGE));
   db.prepare('delete from tour_links where erstellt < ?').run(vor(LINK_TAGE));
+  db.prepare('delete from tour_karten where bis < ?').run(new Date().toISOString());
 }
 
 const pruefsumme = (s) => createHash('sha256').update(s).digest('base64url');
@@ -348,6 +354,14 @@ export async function tourenWeg(methode, pfad, url, wer, koerper, basis, senden,
     return { datum, touren: await Promise.all(touren.map((t) => lageEintrag(db, ortung, t))) };
   }
 
+  if (methode === 'POST' && pfad === '/touren/kartenlink') {
+    if (!dispo) throw new TourFehler(403, 'Nur für die Disposition');
+    const schluessel = `k${randomBytes(18).toString('base64url')}`;
+    const jetzt = new Date();
+    db.prepare('insert into tour_karten values (?, ?, ?, ?)').run(pruefsumme(schluessel), ich.id, jetzt.toISOString(), new Date(jetzt.getTime() + KARTENLINK_STUNDEN * 3600_000).toISOString());
+    return { link: `${basis}/lagekarte/${schluessel}`, stunden: KARTENLINK_STUNDEN };
+  }
+
   if (methode === 'GET' && pfad === '/touren/verlauf') {
     const tour = tourLesen(db, url.searchParams.get('tour') ?? '');
     if (!eigene(tour)) throw new TourFehler(404, 'Unbekannte Tour');
@@ -483,4 +497,65 @@ export function fuerFremdfahrer(ergebnis, mitarbeiterId, db) {
         (a.sammlung === 'roh' && ['firma', 'logo', 'farben'].includes(a.id)),
     ),
   };
+}
+
+/**
+ * Karte aller Fahrzeuge für die Disposition, ohne Anmeldung über einen Einmal-Link (12 h). Die App
+ * öffnet sie als Fenster über der App (Custom Tab), statt die ganze Browser-Fassung zu laden.
+ * Gilt nur, solange die Person, die den Link geholt hat, aktiv ist und Disposition darf.
+ * Antwort: { html } für die Seite, { json } für die Lage, null wenn unbekannt oder abgelaufen.
+ */
+export async function lagekarteSeite(speicher, ortung, schluessel, nurLage) {
+  if (!/^k[A-Za-z0-9_-]{20,30}$/.test(schluessel)) return null;
+  const pruef = pruefsumme(schluessel);
+  for (const b of speicher.alleBetriebe()) {
+    tabellen(b.db);
+    const k = b.db.prepare('select * from tour_karten where pruef = ?').get(pruef);
+    if (!k) continue;
+    if (k.bis < new Date().toISOString()) return null;
+    const m = b.db.prepare('select id, rolle, aktiv, bereiche from mitarbeiter where id = ?').get(k.mitarbeiter);
+    if (!m || !m.aktiv || !darfDispo({ rolle: m.rolle, bereiche: m.bereiche ? JSON.parse(m.bereiche) : null })) return null;
+    if (nurLage) {
+      const touren = await Promise.all(tourenVon(b.db, heute()).map((t) => lageEintrag(b.db, ortung, t)));
+      return {
+        json: {
+          stand: new Date().toISOString(),
+          touren: touren.map((x) => {
+            const n = x.stopps.find((y) => y.id === x.naechster);
+            return { name: x.name, fahrer: x.fahrer, fahrzeug: x.fahrzeug, status: x.status, verspaetet: x.verspaetet, stoerung: x.stoerung ?? null, erledigt: x.erledigt, gesamt: x.gesamt, position: x.position, naechster: n ? { name: n.name, ankunft: n.ankunft } : null };
+          }),
+        },
+      };
+    }
+    const kacheln = kachelnDa();
+    return {
+      html: `<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><meta name="referrer" content="no-referrer"><title>${esc(b.name)} – Lage</title>
+<link rel="stylesheet" href="../karte/leaflet.css"><script src="../karte/leaflet.js"></script>${kacheln ? '<script src="../karte/protomaps-leaflet.js"></script>' : ''}
+<style>html,body{margin:0;height:100%;font-family:system-ui,sans-serif}#karte{position:absolute;inset:0 0 0 0}#kopf{position:absolute;z-index:1000;top:8px;left:8px;right:8px;display:flex;gap:8px;align-items:center;background:#fffffff0;border-radius:10px;padding:8px 12px;box-shadow:0 1px 4px #0003;font-size:14px}#kopf b{flex:1}.leer{position:absolute;z-index:1000;bottom:16px;left:16px;right:16px;background:#fff;border-radius:10px;padding:10px 12px;box-shadow:0 1px 4px #0003;font-size:14px}.leaflet-tooltip{font-size:13px}</style></head>
+<body><div id="karte"></div><div id="kopf"><b>${esc(b.name)}</b><span id="stand">…</span></div><div id="leer" class="leer" hidden>Noch keine Position gemeldet – sie kommt, sobald ein Fahrer die Tour beginnt.</div>
+<script>(function(){
+var m=L.map('karte',{zoomControl:false}).setView([51.1,10.4],6);L.control.zoom({position:'bottomright'}).addTo(m);
+${kachelLayerJs('..')}
+var g=L.layerGroup().addTo(m),erst=true;
+var F={geplant:'#8A929C',faehrt:'#208AEF',beim_kunden:'#7B4FD6',pause:'#E0A100',stoerung:'#C0392B',fertig:'#2E7D32'};
+var T={geplant:'Geplant',faehrt:'Unterwegs',beim_kunden:'Beim Kunden',pause:'Pause',stoerung:'Störung',fertig:'Fertig'};
+function e(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+function uhr(i){return new Date(i).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})}
+function laden(){fetch(location.pathname.replace(/[/]$/,'')+'/lage',{cache:'no-store'}).then(function(r){if(!r.ok)throw r.status;return r.json()}).then(function(d){
+g.clearLayers();var p=[];
+d.touren.forEach(function(x){if(!x.position)return;var q=[x.position.lat,x.position.lon];p.push(q);
+var z=['<b>'+e(x.fahrer||x.name)+'</b>'+(x.fahrzeug?' · '+e(x.fahrzeug):''),e(T[x.status]||x.status)+(x.verspaetet?' · verspätet':'')+' · '+x.erledigt+'/'+x.gesamt+' Stopps'];
+if(x.stoerung)z.push('Störung: '+e(x.stoerung));
+if(x.naechster)z.push('Nächster: '+e(x.naechster.name)+(x.naechster.ankunft?' · ca. '+uhr(x.naechster.ankunft):''));
+z.push('Position '+uhr(x.position.zeit));
+L.circleMarker(q,{radius:10,weight:3,color:x.verspaetet?F.stoerung:'#fff',fillColor:F[x.status]||'#208AEF',fillOpacity:.95}).bindTooltip(z.join('<br>'),{direction:'top'}).addTo(g);});
+document.getElementById('leer').hidden=p.length>0;
+document.getElementById('stand').textContent='Stand '+uhr(d.stand);
+if(erst&&p.length){erst=false;if(p.length===1)m.setView(p[0],12);else m.fitBounds(L.latLngBounds(p),{padding:[40,40],maxZoom:13});}
+}).catch(function(s){document.getElementById('stand').textContent=s===404?'Link abgelaufen':'keine Verbindung';});}
+laden();setInterval(laden,30000);
+})();</script></body></html>`,
+    };
+  }
+  return null;
 }

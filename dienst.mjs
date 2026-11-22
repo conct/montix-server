@@ -37,7 +37,7 @@ import { erstelleZahlung, ZahlFehler } from './zahlung.mjs';
 import { erstelleKasse, hatRecht, KassenDatei, KassenFehler } from './kasse.mjs';
 import { fehlerMelden } from './fehler.mjs';
 import { erstelleAdresssuche } from './adresse.mjs';
-import { darfDispo, erstelleOrtung, fuerFremdfahrer, sendungSeite, TourFehler, tourenWeg } from './touren.mjs';
+import { darfDispo, erstelleOrtung, fuerFremdfahrer, lagekarteSeite, sendungSeite, TourFehler, tourenWeg } from './touren.mjs';
 import { sendungMail } from './mailvorlage.mjs';
 import { karteWeg } from './karte.mjs';
 import { erstellePartner, PartnerFehler } from './partner.mjs';
@@ -280,6 +280,20 @@ export function erstelleDienst(
         const html = await sendungSeite(speicher, ortung, sendung[1]);
         res.writeHead(html ? 200 : 404, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
         return res.end(html ?? '<!doctype html><meta charset="utf-8"><p>Diese Sendung gibt es nicht (mehr).</p>');
+      }
+
+      // Touren: Karte aller Fahrzeuge über einen Einmal-Link der Disposition — siehe touren.mjs.
+      const lk = pfad.match(/^\/lagekarte\/([A-Za-z0-9_-]+)(\/lage)?$/);
+      if (req.method === 'GET' && lk) {
+        const r = await lagekarteSeite(speicher, ortung, lk[1], !!lk[2]);
+        if (r?.json) return antwort(res, 200, r.json);
+        if (!r) {
+          if (lk[2]) return antwort(res, 404, { fehler: 'Link abgelaufen' });
+          res.writeHead(404, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-robots-tag': 'noindex' });
+          return res.end('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><p style="font:17px system-ui;margin:2em">Dieser Kartenlink ist abgelaufen. In Montix die Karte noch einmal öffnen.</p>');
+        }
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-robots-tag': 'noindex', 'referrer-policy': 'no-referrer' });
+        return res.end(r.html);
       }
 
       // Terminmitteilung: Kunde bestätigt oder lehnt ab — siehe terminmitteilung.mjs.

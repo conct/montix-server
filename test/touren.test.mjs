@@ -195,3 +195,23 @@ test('Positionen nach 30 Tagen und Empfänger-Links nach 90 Tagen gelöscht', as
   assert.equal(db.prepare("select count(*) as n from tour_letzte where tour = 'alt'").get().n, 0);
   assert.equal(db.prepare("select count(*) as n from tour_links where pruef = 'pruef_alt'").get().n, 0);
 });
+
+test('Kartenlink der Disposition: Seite und Lage ohne Anmeldung, nur für die Disposition, verfällt mit der Person', async () => {
+  const dispo = await geraet('Dispo Karte', 'verwalter');
+  const fahrer = await geraet('Fahrer Karte', 'mitarbeiter');
+  assert.equal((await rufe('/touren/kartenlink', { token: fahrer.token, body: {} })).status, 403);
+  const r = await rufe('/touren/kartenlink', { token: dispo.token, body: {} });
+  assert.equal(r.status, 200);
+  const pfad = new URL(r.daten.link).pathname;
+  const seite = await fetch(basis + pfad);
+  assert.equal(seite.status, 200);
+  const html = await seite.text();
+  assert.ok(html.includes('../karte/leaflet.js') && !html.includes('unpkg.com'));
+  const lage = await (await fetch(`${basis}${pfad}/lage`)).json();
+  assert.ok(Array.isArray(lage.touren));
+  assert.equal((await fetch(`${basis}/lagekarte/kgibtsnichtgibtsnichtgibtsnicht`)).status, 404);
+  // Person gesperrt → Link tot.
+  const db = speicher.pruefe(dispo.token).db;
+  db.prepare('update mitarbeiter set aktiv = 0 where id = ?').run(dispo.mitarbeiter.id);
+  assert.equal((await fetch(`${basis}${pfad}/lage`)).status, 404);
+});
