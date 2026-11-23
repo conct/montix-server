@@ -7,8 +7,11 @@
 // `mehrplatz` ist kein Modul, sondern ein Vermerk: Der Betrieb hat eine gekaufte Mehrplatz-Lizenz
 // (Anzahl = Plätze). Die Lizenz selbst ist ein Schlüssel auf den Geräten, den der Server nicht
 // sieht; der Vermerk sorgt dafür, dass die Monatsrechnung die Modulpreise von Einzel Plus nimmt.
+//
+// `enterprise` ist ebenfalls ein Vermerk: 1 = Enterprise monatlich (eine Position 899 € statt aller
+// Module), 12 = Enterprise jährlich bezahlt (8.990 € gesondert, die Monatsrechnung entfällt).
 
-export const MODULE = { kasse: 'Barkasse mit TSE', mehrplatz: 'Mehrplatz-Lizenz (Modulpreise wie Einzel Plus)' };
+export const MODULE = { kasse: 'Barkasse mit TSE', mehrplatz: 'Mehrplatz-Lizenz (Modulpreise wie Einzel Plus)', enterprise: 'Enterprise (1 = monatlich, 12 = jährlich bezahlt)' };
 
 const tabelle = (db) => db.exec('create table if not exists module (id text primary key, anzahl integer not null, gebucht text not null, von text)');
 

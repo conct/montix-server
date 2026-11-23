@@ -99,6 +99,6 @@ Das Gerät bleibt danach dauerhaft angemeldet, bis es abgemeldet oder die Person
   const n = modulAnzahl(b.db, rest[1]);
   console.log(`${MODULE[rest[1]]} für ${b.name}: ${n ? `${n} gebucht` : 'nicht gebucht'}.`);
 } else {
-  console.log('Aufruf: node verwalten.mjs betrieb "<Name>" | betrieb-loeschen <betrieb> [--ja] | einladung <betrieb> "<Name>" [verwalter|mitarbeiter] | serverpaket <betrieb> an|aus | modul <betrieb> kasse <anzahl> | nutzung <betrieb> [JJJJ-MM] | karte | adressen | hilfe | hilfe-erledigt <schluessel> …');
+  console.log('Aufruf: node verwalten.mjs betrieb "<Name>" | betrieb-loeschen <betrieb> [--ja] | einladung <betrieb> "<Name>" [verwalter|mitarbeiter] | serverpaket <betrieb> an|aus | modul <betrieb> kasse|mehrplatz <anzahl> | modul <betrieb> enterprise 0|1|12 | nutzung <betrieb> [JJJJ-MM] | karte | adressen | hilfe | hilfe-erledigt <schluessel> …');
   process.exit(1);
 }

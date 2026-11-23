@@ -66,6 +66,9 @@ export function tabelle(db) {
       id text primary key, kunde text not null, zeit text not null, name text, text text not null,
       rueckruf text, gelesen text
     );
+    create table if not exists portal_zahlsitzungen (
+      sitzung text primary key, beleg text not null, kunde text not null, erstellt text not null
+    );
     create table if not exists portal_dateien (
       id text primary key, kunde text not null, nachricht text, zeit text not null, name text, typ text not null,
       groesse integer not null, daten blob not null
@@ -101,6 +104,58 @@ function pushAnBetrieb(db, push, portal, titel, nachricht) {
   if (!push) return;
   const ids = [portal.von, ...db.prepare("select id from mitarbeiter where rolle = 'verwalter' and aktiv = 1").all().map((z) => z.id)].filter(Boolean);
   void push(tokensVon(db, [...new Set(ids)]).map((t) => pushNachricht(t, titel, nachricht, false, `/clients/${portal.kunde}`)));
+}
+
+/**
+ * Bezahlte Stripe-Sitzung vermerken (einmal je Rechnung) und den Betrieb benachrichtigen.
+ * `s` kommt immer frisch von Stripe (GET /checkout/sessions/<id>), nie aus dem Aufruf.
+ */
+function zahlungVermerken(db, push, portal, x, s) {
+  if (x.online) return;
+  const betrag = (s.amount_total ?? 0) / 100;
+  db.prepare('update portal_belege set online = ? where beleg = ?').run(JSON.stringify({ zeit: jetzt(), betrag, sitzung: s.id }), x.beleg);
+  db.prepare('delete from portal_zahlsitzungen where beleg = ?').run(x.beleg);
+  pushAnBetrieb(db, push, portal, 'Rechnung online bezahlt', `Rechnung ${x.nummer ?? ''} über ${eur(betrag, x.waehrung)} ist im Kundenportal bezahlt worden.`);
+}
+
+/**
+ * Zahlungen ohne Rückkehr: Wer bei Stripe bezahlt, aber die Seite schließt, bevor es zurück ins
+ * Kundenportal geht, wird sonst nie vermerkt. Der Server fragt deshalb offene Sitzungen der letzten
+ * 24 Stunden selbst bei Stripe nach (alle 10 Minuten aus dem Zeitgeber). Kein Webhook nötig — der
+ * Betrieb muss in seinem Stripe-Konto nichts einrichten.
+ */
+export async function offeneZahlungenPruefen(speicher, zahlung, push, jetztMs = Date.now()) {
+  if (!zahlung?.stripe) return 0;
+  let vermerkt = 0;
+  const seit = new Date(jetztMs - 24 * 3600_000).toISOString();
+  for (const b of speicher.alleBetriebe()) {
+    const db = b.db;
+    tabelle(db);
+    const offen = db.prepare('select * from portal_zahlsitzungen where erstellt >= ?').all(seit);
+    db.prepare('delete from portal_zahlsitzungen where erstellt < ?').run(seit);
+    if (!offen.length) continue;
+    const schluessel = zahlung.stripeSchluessel?.(db);
+    if (!schluessel) continue;
+    for (const o of offen) {
+      const x = db.prepare('select * from portal_belege where beleg = ? and kunde = ?').get(o.beleg, o.kunde);
+      if (!x || x.online) {
+        db.prepare('delete from portal_zahlsitzungen where sitzung = ?').run(o.sitzung);
+        continue;
+      }
+      try {
+        const s = await zahlung.stripe(schluessel, 'GET', `/checkout/sessions/${o.sitzung}`);
+        if (s.metadata?.beleg !== o.beleg) continue;
+        if (s.payment_status === 'paid') {
+          const portal = db.prepare('select * from portale where kunde = ? order by erstellt desc').get(o.kunde) ?? { kunde: o.kunde };
+          zahlungVermerken(db, push, portal, x, s);
+          vermerkt++;
+        } else if (s.status === 'expired') db.prepare('delete from portal_zahlsitzungen where sitzung = ?').run(o.sitzung);
+      } catch (e) {
+        console.error(`Kundenportal ${b.id}: Stripe-Sitzung nicht prüfbar: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+  }
+  return vermerkt;
 }
 
 /** Wege für die App (angemeldet). */
@@ -386,6 +441,7 @@ export async function portalOeffentlich(speicher, req, res, pfad, url, push, { b
         'payment_intent_data[description]': `Rechnung ${x.nummer ?? ''}`.trim(),
         'payment_intent_data[metadata][beleg]': x.beleg,
       });
+      if (/^cs_[A-Za-z0-9_]+$/.test(s.id ?? '')) db.prepare('insert or ignore into portal_zahlsitzungen values (?, ?, ?, ?)').run(s.id, x.beleg, p.kunde, jetzt());
       res.writeHead(303, { location: s.url, ...KOPF });
       res.end();
       return true;
@@ -425,11 +481,7 @@ export async function portalOeffentlich(speicher, req, res, pfad, url, push, { b
       const s = await zahlung.stripe(stripeSchluessel, 'GET', `/checkout/sessions/${sitzung}`);
       const x = s.metadata?.montix === '1' && s.metadata?.betrieb === b.id && s.metadata?.kunde === p.kunde ? db.prepare('select * from portal_belege where beleg = ? and kunde = ?').get(s.metadata.beleg, p.kunde) : null;
       if (x && s.payment_status === 'paid') {
-        if (!x.online) {
-          const betrag = (s.amount_total ?? 0) / 100;
-          db.prepare('update portal_belege set online = ? where beleg = ?').run(JSON.stringify({ zeit: jetzt(), betrag, sitzung }), x.beleg);
-          pushAnBetrieb(db, push, p, 'Rechnung online bezahlt', `Rechnung ${x.nummer ?? ''} über ${eur(betrag, x.waehrung)} ist im Kundenportal bezahlt worden.`);
-        }
+        zahlungVermerken(db, push, p, x, { ...s, id: sitzung });
         bezahltMeldung = 'Vielen Dank! Die Zahlung ist eingegangen.';
       } else if (x) bezahltMeldung = 'Die Zahlung ist noch nicht bestätigt. Sie erscheint hier, sobald Stripe sie meldet.';
     } catch (e) {

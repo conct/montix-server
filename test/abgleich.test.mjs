@@ -1434,6 +1434,18 @@ test('Kundenportal: Rechnung online bezahlen über das Stripe-Konto des Betriebs
     assert.equal((await fetch(`${basis}${p}/bezahlen/re1`, { redirect: 'manual' })).status, 400);
     // Ein anderer Betrieb kann die Sitzung nicht für sich nutzen (Metadaten passen nicht).
     assert.ok(stripeAufrufe.includes('POST /checkout/sessions'));
+
+    // Ohne Rückkehr: Kunde zahlt und schließt die Seite — der Server fragt offene Sitzungen selbst nach.
+    await rufe('/portal/beleg', { token: v.token, body: { kunde: 'kz', beleg: 're2', art: 'rechnung', nummer: 'RE-2', datum: '2026-11-23', betrag: 50, daten: pdf } });
+    assert.equal((await fetch(`${basis}${p}/bezahlen/re2`, { redirect: 'manual' })).status, 303);
+    assert.equal(await server.offeneZahlungenPruefen(), 0, 'noch nicht bezahlt');
+    sitzungen.get('cs_test_2').payment_status = 'paid';
+    pushes.length = 0;
+    assert.equal(await server.offeneZahlungenPruefen(), 1);
+    const re2 = (await rufe('/portal?kunde=kz', { token: v.token })).daten.belege.find((x) => x.beleg === 're2');
+    assert.equal(re2.online.betrag, 50);
+    assert.equal(re2.online.sitzung, 'cs_test_2');
+    assert.equal(await server.offeneZahlungenPruefen(), 0, 'nur einmal');
   } finally {
     globalThis.fetch = echt;
   }

@@ -30,7 +30,7 @@ import { erstelleSendmail } from './post.mjs';
 import { unterwegsWeg, WegFehler, wegSeite } from './unterwegs.mjs';
 import { abgelaufeneAufraeumen, FreigabeFehler, freigabeWeg, teilenOeffentlich } from './freigaben.mjs';
 import { erstelleRaeume, RaumFehler } from './raeume.mjs';
-import { PortalFehler, portalOeffentlich, portalWeg } from './portal.mjs';
+import { offeneZahlungenPruefen, PortalFehler, portalOeffentlich, portalWeg } from './portal.mjs';
 import { alarmZiele, erstelleExpoPush, nachricht as pushNachricht, pushWeg, tokensVon } from './push.mjs';
 import { erstelleMail, MailFehler, pythonHelfer } from './mail.mjs';
 import { NachrichtFehler, nachrichtenweg } from './nachrichten.mjs';
@@ -198,6 +198,9 @@ export function erlaubte(liste, mitarbeiter, db) {
     // trüge sich jemand selbst einen Staplerschein ein); Unterweisungen darf jeder eintragen.
     if (a.sammlung === 'gefaehrdungen' || a.sammlung === 'nachweise' || a.sammlung === 'gefahrstoffe' || a.sammlung === 'formulare') return mitarbeiter.rolle === 'verwalter';
     // Verbandbuch: jeder trägt ein (Kennung beginnt mit der eigenen ID), ändern nur eigene oder der Verwalter.
+    // Unterweisung auf dem eigenen Handy bestätigen: nur für sich selbst (Kennung <eigene ID>_<Unterweisung>);
+    // der Verwalter darf eine Bestätigung nur entfernen.
+    if (a.sammlung === 'unterweisungsbestaetigungen') return (a.id.startsWith(`${mitarbeiter.id}_`) && (a.geloescht || a.inhalt?.person?.id === mitarbeiter.id)) || (mitarbeiter.rolle === 'verwalter' && !!a.geloescht);
     if (a.sammlung === 'verbandbuch') return mitarbeiter.rolle === 'verwalter' || a.id.startsWith(`${mitarbeiter.id}_`);
     return true;
   });
@@ -893,6 +896,8 @@ export function erstelleDienst(
       postVerschicken();
       void partner.weiterleiten();
       termineErinnern();
+      // Online-Zahlungen im Kundenportal, deren Kunde nicht zurückgekehrt ist (alle 10 Minuten).
+      if ((minuten + 1) % 10 === 0) void offeneZahlungenPruefen(speicher, zahlungsweg, push).catch((e) => console.error('Zahlungen prüfen', e));
       if (++minuten % 60 === 0) {
         aufraeumen();
         void abos.auffrischen();
@@ -910,5 +915,6 @@ export function erstelleDienst(
   server.aufraeumen = aufraeumen;
   server.postVerschicken = postVerschicken;
   server.termineErinnern = termineErinnern;
+  server.offeneZahlungenPruefen = () => offeneZahlungenPruefen(speicher, zahlungsweg, push);
   return server;
 }
