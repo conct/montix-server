@@ -35,6 +35,7 @@ import { alarmZiele, erstelleExpoPush, nachricht as pushNachricht, pushWeg, toke
 import { erstelleMail, MailFehler, pythonHelfer } from './mail.mjs';
 import { NachrichtFehler, nachrichtenweg } from './nachrichten.mjs';
 import { erstelleZahlung, ZahlFehler } from './zahlung.mjs';
+import { erstelleKurse } from './kurse.mjs';
 import { erstelleKasse, hatRecht, KassenDatei, KassenFehler } from './kasse.mjs';
 import { fehlerMelden } from './fehler.mjs';
 import { adresseInfo, erstelleAdresssuche } from './adresse.mjs';
@@ -233,6 +234,8 @@ export function erstelleDienst(
     // Prüfung von Store-Käufen (MONTIX_PLAY_*); in Tests eigene Werte und ein Fänger statt fetch.
     aboUmgebung = process.env,
     aboHolen = fetch,
+    // EZB-Referenzkurse zur Orientierung (kurse.mjs); in Tests ein Fänger statt fetch.
+    kurseHolen = fetch,
     // Mail-Client je Mitarbeiter (IMAP/SMTP über mail-helfer.py); in Tests ein Fänger.
     mailHelfer = pythonHelfer,
     // Barkasse: TSE_* als Vorgabe auf einem eigenen Server; in Tests ein Fänger statt https zu fiskaly.
@@ -243,6 +246,7 @@ export function erstelleDienst(
   } = {},
 ) {
   const zahlungsweg = erstelleZahlung(speicher.speicherOrt ?? ordner);
+  const kurse = erstelleKurse(speicher.speicherOrt ?? ordner, { holen: kurseHolen });
   // Zentrales Hosting (AVV-Pflicht) = feste 15 Minuten für die Sammelmail, außer mit Serverpaket.
   const raeume = erstelleRaeume({ ordner: speicher.speicherOrt ?? ordner, senden, push, zentral: vertragPflicht });
   // Öffentliche Adresse des Dienstes (für Links in Mails); ohne Umgebung die zuletzt gesehene.
@@ -587,6 +591,9 @@ export function erstelleDienst(
         return antwort(res, 200, { ok: true });
       }
 
+      // EZB-Referenzkurse zur Orientierung (nie für Belege) — siehe kurse.mjs.
+      if (pfad === '/kurse' && req.method === 'GET') return antwort(res, 200, (await kurse.auffrischen()) ?? { kurse: null });
+
       // Kartenzahlung (Stripe Terminal) über das Konto des Betriebs — siehe zahlung.mjs.
       try {
         const z = await zahlungsweg(req.method, pfad, wer, () => koerper(req));
@@ -915,6 +922,7 @@ export function erstelleDienst(
   server.aufraeumen = aufraeumen;
   server.postVerschicken = postVerschicken;
   server.termineErinnern = termineErinnern;
+  server.kurse = kurse;
   server.offeneZahlungenPruefen = () => offeneZahlungenPruefen(speicher, zahlungsweg, push);
   return server;
 }

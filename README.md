@@ -76,6 +76,7 @@ Geräte).
 | `MONTIX_DATEN_AUTO` | aus | `an`: neue Karten- und Adressdaten nachts selbst holen (sonst nur Hinweis) |
 | `MONTIX_KARTE_QUELLE` | `https://montix.feif.space/karte/karte.pmtiles` | Woher `node verwalten.mjs karte` die Datei holt |
 | `TSE_ANBIETER`, `TSE_API_KEY`, `TSE_API_SECRET`, `TSE_TSS_ID` | leer | Barkasse: Vorgabe für die TSE bei fiskaly (sonst in der App einrichten) |
+| `MONTIX_EZB` | an | `aus`: keine EZB-Referenzkurse holen (dann zeigt die App bei Fremdwährung keinen ungefähren Euro-Betrag) |
 
 ## Was den Server verlässt
 
@@ -84,6 +85,8 @@ Geräte).
 - **Touren**: mit `MONTIX_ORS_KEY` zwei Koordinatenpaare an openrouteservice. Ohne Kartendatei laden die Browser der Disposition und der
   Empfänger die Kartenbilder von OpenStreetMap.
 - **Barkasse**: die Signaturanfragen an fiskaly, wenn eine TSE eingerichtet ist.
+- **Kartenzahlung und Online-Zahlung im Kundenportal**: Anfragen an Stripe mit dem Schlüssel Ihres Stripe-Kontos, wenn Sie einen hinterlegt haben. Offene Zahlungen fragt der Server bis zu 24 Stunden lang selbst bei Stripe nach.
+- **Wechselkurse**: höchstens zweimal am Tag ein Abruf der Referenzkurse bei der Europäischen Zentralbank (`ecb.europa.eu`), ohne Daten von Ihnen. Abschalten mit `MONTIX_EZB=aus`.
 - **Partnerbetriebe**: übernimmt Ihr Betrieb eine Tour einer anderen Firma, schickt der Server deren
   Server die Meldungen und die Position zu dieser Tour.
 - **Fehler melden** in der App: Diese Meldung geht per Mail an den Montix-Support, damit wir
