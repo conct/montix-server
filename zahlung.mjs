@@ -99,7 +99,7 @@ export function erstelleZahlung(ordner) {
   }
 
   /** Bearbeitet die Zahlungswege; gibt undefined zurück, wenn der Pfad nicht dazugehört. */
-  return async function zahlungsweg(methode, pfad, wer, koerper) {
+  async function zahlungsweg(methode, pfad, wer, koerper) {
     const zahlId = pfad.match(/^\/zahlung\/(pi_[A-Za-z0-9]+)$/)?.[1];
     const bekannt =
       zahlId ||
@@ -158,5 +158,10 @@ export function erstelleZahlung(ordner) {
       return { status: pi.status, betragCent: pi.amount_received || pi.amount };
     }
     throw new ZahlFehler(404, 'Unbekannter Weg');
-  };
+  }
+
+  // Für das Kundenportal (Rechnung online bezahlen): Schlüssel des Betriebs und Aufruf der Stripe-Schnittstelle.
+  zahlungsweg.stripeSchluessel = (db) => stripeDaten(db)?.schluessel ?? null;
+  zahlungsweg.stripe = stripe;
+  return zahlungsweg;
 }

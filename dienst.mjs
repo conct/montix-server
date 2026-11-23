@@ -196,7 +196,7 @@ export function erlaubte(liste, mitarbeiter, db) {
     if (a.sammlung === 'roh' && FIRMA_ROH.includes(a.id)) return mitarbeiter.rolle === 'verwalter';
     // Arbeitsschutz: Gefährdungsbeurteilungen und Nachweise der Leute pflegt der Verwalter (sonst
     // trüge sich jemand selbst einen Staplerschein ein); Unterweisungen darf jeder eintragen.
-    if (a.sammlung === 'gefaehrdungen' || a.sammlung === 'nachweise' || a.sammlung === 'gefahrstoffe') return mitarbeiter.rolle === 'verwalter';
+    if (a.sammlung === 'gefaehrdungen' || a.sammlung === 'nachweise' || a.sammlung === 'gefahrstoffe' || a.sammlung === 'formulare') return mitarbeiter.rolle === 'verwalter';
     // Verbandbuch: jeder trägt ein (Kennung beginnt mit der eigenen ID), ändern nur eigene oder der Verwalter.
     if (a.sammlung === 'verbandbuch') return mitarbeiter.rolle === 'verwalter' || a.id.startsWith(`${mitarbeiter.id}_`);
     return true;
@@ -395,7 +395,7 @@ export function erstelleDienst(
       if (pfad.startsWith('/objekt/') && (await raeume.oeffentlich(speicher, req, res, pfad, url, () => basisVon(req)))) return;
 
       // Kundenportal: Seite des Kunden — siehe portal.mjs.
-      if (pfad.startsWith('/kunde/') && (await portalOeffentlich(speicher, req, res, pfad, url, push))) return;
+      if (pfad.startsWith('/kunde/') && (await portalOeffentlich(speicher, req, res, pfad, url, push, { basis: basisVon(req), zahlung: zahlungsweg }))) return;
 
       // Adressvorschläge beim Tippen (auch ohne Anmeldung, auch Einzelplatz) — siehe adresse.mjs.
       if (req.method === 'GET' && pfad === '/adresse/info') return antwort(res, 200, adresseInfo());

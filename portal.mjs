@@ -23,6 +23,8 @@
 //                            | aktion=termin&datum=&zeit=&text=&name=&rueckruf=   (Terminwunsch)
 //   GET  /kunde/<schlüssel>/beleg/<id>      → PDF eines eingestellten Belegs
 //   GET  /kunde/<schlüssel>/bericht/<id>    → PDF eines abgeschlossenen Arbeitsberichts
+//   GET  /kunde/<schlüssel>/bezahlen/<id>   → weiter zu Stripe Checkout (Rechnung mit Karte bezahlen, Konto des Betriebs)
+//   GET  /kunde/<schlüssel>?ok=bezahlt&sitzung=cs_…  → zurück von Stripe; der Server prüft die Zahlung bei Stripe
 //
 // Der Schlüssel steht im Klartext in der Datenbank des Betriebs (wie die Kundendaten selbst), damit
 // jedes Gerät des Betriebs den Link erneut verschicken kann.
@@ -35,7 +37,7 @@ import { formularMitDatei } from './raeume.mjs';
 const MB = 1024 * 1024;
 const PDF_MAX = 15 * MB;
 const SCHLUESSEL = /^k[A-Za-z0-9_-]{22}$/;
-const ARTEN = { angebot: 'Angebot', rechnung: 'Rechnung', lieferschein: 'Lieferschein', auftragsbestaetigung: 'Auftragsbestätigung' };
+const ARTEN = { angebot: 'Angebot', rechnung: 'Rechnung', lieferschein: 'Lieferschein', auftragsbestaetigung: 'Auftragsbestätigung', formular: 'Formular' };
 /** Anhänge, die ein Kunde schicken darf: Fotos und PDF, höchstens 10 MB, höchstens 30 je Kunde. */
 const ANHANG = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'application/pdf': 'pdf' };
 const ANHANG_MAX = 10 * MB;
@@ -69,6 +71,9 @@ export function tabelle(db) {
       groesse integer not null, daten blob not null
     );
   `);
+  const belegSpalten = new Set(db.prepare('pragma table_info(portal_belege)').all().map((c) => c.name));
+  // Online bezahlt (Stripe Checkout): { zeit, betrag, sitzung }
+  if (!belegSpalten.has('online')) db.exec('alter table portal_belege add column online text');
   // Spätere Spalten: Richtung (Kunde oder Betrieb), Absender im Betrieb, Terminwunsch.
   const da = new Set(db.prepare('pragma table_info(portal_nachrichten)').all().map((c) => c.name));
   for (const [spalte, typ] of [['richtung', "text not null default 'kunde'"], ['von_name', 'text'], ['wunsch', 'text']]) if (!da.has(spalte)) db.exec(`alter table portal_nachrichten add column ${spalte} ${typ}`);
@@ -112,9 +117,9 @@ export function portalWeg(methode, pfad, url, wer, koerper, basis) {
         abrufe: p?.abrufe ?? 0,
         letzterAbruf: p?.letzter_abruf ?? null,
         belege: db
-          .prepare('select beleg, art, nummer, datum, betrag, eingestellt, angenommen from portal_belege where kunde = ? order by eingestellt desc')
+          .prepare('select beleg, art, nummer, datum, betrag, eingestellt, angenommen, online from portal_belege where kunde = ? order by eingestellt desc')
           .all(kunde)
-          .map((b) => ({ ...b, angenommen: b.angenommen ? JSON.parse(b.angenommen) : null })),
+          .map((b) => ({ ...b, angenommen: b.angenommen ? JSON.parse(b.angenommen) : null, online: b.online ? JSON.parse(b.online) : null })),
         nachrichten: db
           .prepare('select n.*, d.id as anhang, d.name as anhang_name, d.typ as anhang_typ from portal_nachrichten n left join portal_dateien d on d.nachricht = n.id where n.kunde = ? order by n.zeit desc limit 50')
           .all(kunde)
@@ -200,7 +205,7 @@ textarea{min-height:90px}label{font-size:14px;font-weight:600;color:#374151}
 .marke{font-size:12px;font-weight:700;padding:2px 8px;border-radius:999px;background:#e8f2fe;color:#0b5fb8;white-space:nowrap}.ok{background:#e7f6ea;color:#1e6b2c}
 .hinweis{background:#e7f6ea;border:1px solid #b6e0bf;color:#1e6b2c;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-weight:700}
 .fehler{background:#fdecec;border:1px solid #f5b5b5;color:#9b1c1c;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-weight:700}
-details summary{cursor:pointer;font-weight:700;color:#208aef;margin:8px 0}input[type=file]{display:block;margin:6px 0 12px}
+a.knopf{display:inline-block;margin-top:6px;padding:9px 14px;border-radius:8px;background:#208aef;color:#fff;text-decoration:none}details summary{cursor:pointer;font-weight:700;color:#208aef;margin:8px 0}input[type=file]{display:block;margin:6px 0 12px}
 .nachricht{border-radius:10px;padding:8px 12px;margin:0 0 10px;max-width:85%}.nachricht.kunde{background:#e8f2fe;margin-left:auto}.nachricht.betrieb{background:#f1f2f4}</style></head>
 <body><main>${inhaltHtml}</main></body></html>`;
 
@@ -242,7 +247,7 @@ export function portalSeiteDaten(db, kunde, heute = new Date().toISOString().sli
     .sort((a, b) => String(b.datum).localeCompare(String(a.datum)))
     .slice(0, 30);
   const wartungen = alle(db, 'wartungen', kunde).filter((w) => !w.endet || w.endet >= heute);
-  const belege = db.prepare('select beleg, art, nummer, datum, betrag, angenommen from portal_belege where kunde = ? order by datum desc, eingestellt desc').all(kunde);
+  const belege = db.prepare('select beleg, art, nummer, datum, betrag, angenommen, online from portal_belege where kunde = ? order by datum desc, eingestellt desc').all(kunde);
   // Gesprächsverlauf: die letzten 20 Nachrichten beider Seiten, älteste zuerst.
   const verlauf = db
     .prepare('select n.zeit, n.name, n.text, n.richtung, n.von_name, n.wunsch, d.name as anhang from portal_nachrichten n left join portal_dateien d on d.nachricht = n.id where n.kunde = ? order by n.zeit desc limit 20')
@@ -251,7 +256,7 @@ export function portalSeiteDaten(db, kunde, heute = new Date().toISOString().sli
   return { firma, kunde: k, termine, berichte, wartungen, belege, verlauf };
 }
 
-function kundenSeite(b, p, schluessel, { meldung, fehler }) {
+function kundenSeite(b, p, schluessel, { meldung, fehler, karte = false }) {
   const d = portalSeiteDaten(b.db, p.kunde);
   const firmaName = d.firma.party?.name || b.name;
   const kontakt = [d.firma.party?.contact?.phone, d.firma.party?.contact?.email].filter(Boolean).map(esc).join(' · ');
@@ -281,8 +286,11 @@ ${an ? `<div><span class="marke ok">angenommen von ${esc(an.name)} am ${tagDe(an
 
   const belegHtml = andere
     .map((x) => {
-      const status = x.art === 'rechnung' ? (bezahlt(b.db, x.beleg, x.betrag) ? '<span class="marke ok">bezahlt</span>' : '') : '';
-      return `<div class="zeile"><div class="inhalt"><div class="titel">${ARTEN[x.art] ?? 'Beleg'} ${esc(x.nummer ?? '')}</div><div class="grau">${tagDe(x.datum)}${x.betrag != null ? ` · ${eur(x.betrag)}` : ''}</div><a href="${basis}/beleg/${encodeURIComponent(x.beleg)}">PDF ansehen</a></div>${status}</div>`;
+      const istBezahlt = x.art === 'rechnung' && (bezahlt(b.db, x.beleg, x.betrag) || !!x.online);
+      const status = istBezahlt ? '<span class="marke ok">bezahlt</span>' : '';
+      // Online bezahlen nur mit Stripe-Konto des Betriebs und offenem Betrag.
+      const zahlen = x.art === 'rechnung' && !istBezahlt && karte && x.betrag >= 0.5 ? `<p><a class="knopf" href="${basis}/bezahlen/${encodeURIComponent(x.beleg)}">Jetzt online bezahlen</a></p>` : '';
+      return `<div class="zeile"><div class="inhalt"><div class="titel">${ARTEN[x.art] ?? 'Beleg'} ${esc(x.nummer ?? '')}</div><div class="grau">${tagDe(x.datum)}${x.betrag != null ? ` · ${eur(x.betrag)}` : ''}</div><a href="${basis}/beleg/${encodeURIComponent(x.beleg)}">PDF ansehen</a>${zahlen}</div>${status}</div>`;
     })
     .join('');
 
@@ -318,7 +326,7 @@ ${meldung ? `<div class="hinweis">${esc(meldung)}</div>` : ''}${fehler ? `<div c
 <label>Rückruf unter (freiwillig)</label><input type="tel" name="rueckruf" maxlength="40" autocomplete="tel">
 <p class="grau"><small>Das ist eine Anfrage. Der Termin steht erst, wenn ${esc(firmaName)} ihn bestätigt.</small></p><p><button>Termin anfragen</button></p></form></details></div>
 ${angebote.length ? `<div class="karte"><h2>Angebote</h2>${angebotHtml}</div>` : ''}
-${andere.length ? `<div class="karte"><h2>Rechnungen und Belege</h2>${belegHtml}</div>` : ''}
+${andere.length ? `<div class="karte"><h2>Rechnungen und Dokumente</h2>${belegHtml}</div>` : ''}
 ${d.berichte.length ? `<div class="karte"><h2>Arbeitsberichte</h2>${berichtHtml}</div>` : ''}
 ${d.wartungen.length ? `<div class="karte"><h2>Wartung</h2>${wartungHtml}</div>` : ''}
 <div class="karte" id="nachricht"><h2>Nachrichten</h2>${verlaufHtml}<form method="post" action="${basis}" enctype="multipart/form-data"><input type="hidden" name="aktion" value="nachricht">
@@ -336,8 +344,8 @@ function weiter(res, schluessel, ok) {
 }
 
 /** Öffentliche Wege /kunde/…; `true`, wenn bearbeitet. */
-export async function portalOeffentlich(speicher, req, res, pfad, url, push) {
-  const m = pfad.match(/^\/kunde\/([A-Za-z0-9_-]+)(?:\/(beleg|bericht)\/([A-Za-z0-9_.-]+))?$/);
+export async function portalOeffentlich(speicher, req, res, pfad, url, push, { basis = '', zahlung = null } = {}) {
+  const m = pfad.match(/^\/kunde\/([A-Za-z0-9_-]+)(?:\/(beleg|bericht|bezahlen)\/([A-Za-z0-9_.-]+))?$/);
   if (!m) return false;
   const [, schluessel, art, id] = m;
   const t = finden(speicher, schluessel);
@@ -347,6 +355,41 @@ export async function portalOeffentlich(speicher, req, res, pfad, url, push) {
   }
   const { b, p } = t;
   const db = b.db;
+  const stripeSchluessel = zahlung?.stripeSchluessel?.(db) ?? null;
+
+  // Rechnung online bezahlen: Stripe-Checkout-Sitzung beim Konto des Betriebs, dann dorthin weiter.
+  if (art === 'bezahlen') {
+    const x = db.prepare("select * from portal_belege where beleg = ? and kunde = ? and art = 'rechnung'").get(id, p.kunde);
+    const fehlerSeite = (text) => (seite(res, 400, rahmen('Montix', `<div class="karte"><h1>${esc(text)}</h1><p><a href="${esc(`${basis}/kunde/${schluessel}`)}">Zurück zum Kundenportal</a></p></div>`)), true);
+    if (!x || !stripeSchluessel) return fehlerSeite('Online bezahlen ist für diese Rechnung nicht möglich.');
+    if (x.online || bezahlt(db, x.beleg, x.betrag)) return fehlerSeite('Diese Rechnung ist schon bezahlt.');
+    if (zuViel(p.kunde)) return fehlerSeite('Zu viele Versuche. Bitte eine Minute warten.');
+    const zurueck = `${basis}/kunde/${schluessel}`;
+    try {
+      const s = await zahlung.stripe(stripeSchluessel, 'POST', '/checkout/sessions', {
+        mode: 'payment',
+        'line_items[0][quantity]': '1',
+        'line_items[0][price_data][currency]': 'eur',
+        'line_items[0][price_data][unit_amount]': String(Math.round(x.betrag * 100)),
+        'line_items[0][price_data][product_data][name]': `Rechnung ${x.nummer ?? ''}`.trim(),
+        success_url: `${zurueck}?ok=bezahlt&sitzung={CHECKOUT_SESSION_ID}`,
+        cancel_url: zurueck,
+        locale: 'de',
+        'metadata[montix]': '1',
+        'metadata[betrieb]': b.id,
+        'metadata[kunde]': p.kunde,
+        'metadata[beleg]': x.beleg,
+        'payment_intent_data[description]': `Rechnung ${x.nummer ?? ''}`.trim(),
+        'payment_intent_data[metadata][beleg]': x.beleg,
+      });
+      res.writeHead(303, { location: s.url, ...KOPF });
+      res.end();
+      return true;
+    } catch (e) {
+      console.error(`Kundenportal ${b.id}: Stripe-Checkout fehlgeschlagen: ${e instanceof Error ? e.message : e}`);
+      return fehlerSeite('Online bezahlen geht gerade nicht. Bitte überweisen oder später noch einmal versuchen.');
+    }
+  }
 
   if (art === 'beleg' || art === 'bericht') {
     let daten = null;
@@ -370,8 +413,28 @@ export async function portalOeffentlich(speicher, req, res, pfad, url, push) {
     return true;
   }
 
+  // Zurück von Stripe: die Sitzung bei Stripe prüfen (nie dem Aufruf glauben) und die Rechnung als bezahlt vermerken.
+  let bezahltMeldung = null;
+  const sitzung = url.searchParams.get('sitzung') ?? '';
+  if (url.searchParams.get('ok') === 'bezahlt' && /^cs_[A-Za-z0-9_]+$/.test(sitzung) && stripeSchluessel) {
+    try {
+      const s = await zahlung.stripe(stripeSchluessel, 'GET', `/checkout/sessions/${sitzung}`);
+      const x = s.metadata?.montix === '1' && s.metadata?.betrieb === b.id && s.metadata?.kunde === p.kunde ? db.prepare('select * from portal_belege where beleg = ? and kunde = ?').get(s.metadata.beleg, p.kunde) : null;
+      if (x && s.payment_status === 'paid') {
+        if (!x.online) {
+          const betrag = (s.amount_total ?? 0) / 100;
+          db.prepare('update portal_belege set online = ? where beleg = ?').run(JSON.stringify({ zeit: jetzt(), betrag, sitzung }), x.beleg);
+          pushAnBetrieb(db, push, p, 'Rechnung online bezahlt', `Rechnung ${x.nummer ?? ''} über ${eur(betrag)} ist im Kundenportal bezahlt worden.`);
+        }
+        bezahltMeldung = 'Vielen Dank! Die Zahlung ist eingegangen.';
+      } else if (x) bezahltMeldung = 'Die Zahlung ist noch nicht bestätigt. Sie erscheint hier, sobald Stripe sie meldet.';
+    } catch (e) {
+      console.error(`Kundenportal ${b.id}: Stripe-Sitzung nicht prüfbar: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
   // Nach dem Absenden neu laden lassen (kein doppeltes Absenden beim Aktualisieren).
-  const meldung = { angenommen: 'Vielen Dank! Das Angebot ist angenommen. Wir melden uns bei Ihnen.', nachricht: 'Vielen Dank, Ihre Nachricht ist angekommen.', termin: 'Vielen Dank! Ihr Terminwunsch ist angekommen. Wir melden uns mit einem Termin.' }[url.searchParams.get('ok') ?? ''] ?? null;
+  const meldung = bezahltMeldung ?? { angenommen: 'Vielen Dank! Das Angebot ist angenommen. Wir melden uns bei Ihnen.', nachricht: 'Vielen Dank, Ihre Nachricht ist angekommen.', termin: 'Vielen Dank! Ihr Terminwunsch ist angekommen. Wir melden uns mit einem Termin.' }[url.searchParams.get('ok') ?? ''] ?? null;
   let fehler = null;
   if (req.method === 'POST') {
     if (zuViel(p.kunde)) {
@@ -423,6 +486,6 @@ export async function portalOeffentlich(speicher, req, res, pfad, url, push) {
   } else {
     db.prepare('update portale set abrufe = abrufe + 1, letzter_abruf = ? where kunde = ?').run(jetzt(), p.kunde);
   }
-  seite(res, fehler ? 400 : 200, kundenSeite(b, p, schluessel, { meldung, fehler }));
+  seite(res, fehler ? 400 : 200, kundenSeite(b, p, schluessel, { meldung, fehler, karte: !!stripeSchluessel }));
   return true;
 }

@@ -1369,3 +1369,72 @@ test('Kundenportal: Link je Kunde, Termine und Berichte aus dem Abgleich, Angebo
   assert.equal((await fetch(basis + p)).status, 404);
   assert.equal((await rufe('/portal?kunde=kp', { token: v.token })).daten.link, null);
 });
+
+test('Kundenportal: Rechnung online bezahlen über das Stripe-Konto des Betriebs, Zahlung bei Stripe geprüft', async () => {
+  const b = speicher.betriebAnlegen('Elektro Zahlt');
+  const v = (await rufe('/anmelden', { body: { code: speicher.einladen(b, 'Vera Verwalter', 'verwalter').code } })).daten;
+  const jetzt = new Date().toISOString();
+  await rufe('/abgleich', { token: v.token, body: { aenderungen: [{ sammlung: 'kunden', id: 'kz', geaendert: jetzt, inhalt: { id: 'kz', party: { name: 'Zahl Kunde' }, updatedAt: jetzt } }] } });
+  const { link } = (await rufe('/portal', { token: v.token, body: { kunde: 'kz' } })).daten;
+  const p = new URL(link).pathname;
+  const pdf = Buffer.from('%PDF-1.7\n' + 'r'.repeat(200)).toString('base64');
+  await rufe('/portal/beleg', { token: v.token, body: { kunde: 'kz', beleg: 're1', art: 'rechnung', nummer: 'RE-1', datum: '2026-11-23', betrag: 119, daten: pdf } });
+
+  // Ohne Stripe-Schlüssel kein Knopf.
+  assert.ok(!(await (await fetch(basis + p)).text()).includes('Jetzt online bezahlen'));
+
+  // Stripe nachbilden: nur Aufrufe an api.stripe.com, alles andere geht wirklich raus.
+  const echt = globalThis.fetch;
+  const sitzungen = new Map();
+  const stripeAufrufe = [];
+  globalThis.fetch = async (u, o = {}) => {
+    const url = String(u);
+    if (!url.startsWith('https://api.stripe.com/v1')) return echt(u, o);
+    const pfad = url.slice('https://api.stripe.com/v1'.length).split('?')[0];
+    stripeAufrufe.push(`${o.method ?? 'GET'} ${pfad}`);
+    const antwort = (j) => new Response(JSON.stringify(j), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (pfad === '/terminal/locations') return antwort({ data: [] });
+    if (pfad === '/checkout/sessions' && o.method === 'POST') {
+      const f = new URLSearchParams(o.body);
+      const id = `cs_test_${sitzungen.size + 1}`;
+      sitzungen.set(id, { id, payment_status: 'unpaid', amount_total: Number(f.get('line_items[0][price_data][unit_amount]')), metadata: { montix: f.get('metadata[montix]'), betrieb: f.get('metadata[betrieb]'), kunde: f.get('metadata[kunde]'), beleg: f.get('metadata[beleg]') }, success_url: f.get('success_url') });
+      return antwort({ id, url: `https://checkout.stripe.com/c/pay/${id}` });
+    }
+    const s = sitzungen.get(pfad.replace('/checkout/sessions/', ''));
+    return s ? antwort(s) : new Response('{"error":{"message":"No such session"}}', { status: 404 });
+  };
+  try {
+    assert.equal((await rufe('/zahlung/stripe', { token: v.token, body: { schluessel: 'rk_test_abcdefghij123' } })).status, 200);
+    const seite = await (await fetch(basis + p)).text();
+    assert.ok(seite.includes('Jetzt online bezahlen'));
+
+    const weiter = await fetch(`${basis}${p}/bezahlen/re1`, { redirect: 'manual' });
+    assert.equal(weiter.status, 303);
+    assert.equal(weiter.headers.get('location'), 'https://checkout.stripe.com/c/pay/cs_test_1');
+    const s = sitzungen.get('cs_test_1');
+    assert.equal(s.amount_total, 11900);
+    assert.equal(s.metadata.beleg, 're1');
+    assert.ok(s.success_url.endsWith(`${p}?ok=bezahlt&sitzung={CHECKOUT_SESSION_ID}`));
+
+    // Noch nicht bezahlt: Rückkehr ändert nichts. Fremde Sitzung: ebenso.
+    let zurueck = await (await fetch(`${basis}${p}?ok=bezahlt&sitzung=cs_test_1`)).text();
+    assert.ok(zurueck.includes('noch nicht bestätigt'));
+    assert.equal((await rufe('/portal?kunde=kz', { token: v.token })).daten.belege[0].online, null);
+    await fetch(`${basis}${p}?ok=bezahlt&sitzung=cs_gibtsnicht`);
+    assert.equal((await rufe('/portal?kunde=kz', { token: v.token })).daten.belege[0].online, null);
+
+    // Bezahlt: vermerkt, „bezahlt“ im Portal, kein Knopf mehr, zweites Bezahlen abgewiesen.
+    s.payment_status = 'paid';
+    pushes.length = 0;
+    zurueck = await (await fetch(`${basis}${p}?ok=bezahlt&sitzung=cs_test_1`)).text();
+    assert.ok(zurueck.includes('Zahlung ist eingegangen') && zurueck.includes('bezahlt') && !zurueck.includes('Jetzt online bezahlen'));
+    const online = (await rufe('/portal?kunde=kz', { token: v.token })).daten.belege[0].online;
+    assert.equal(online.betrag, 119);
+    assert.equal(online.sitzung, 'cs_test_1');
+    assert.equal((await fetch(`${basis}${p}/bezahlen/re1`, { redirect: 'manual' })).status, 400);
+    // Ein anderer Betrieb kann die Sitzung nicht für sich nutzen (Metadaten passen nicht).
+    assert.ok(stripeAufrufe.includes('POST /checkout/sessions'));
+  } finally {
+    globalThis.fetch = echt;
+  }
+});
