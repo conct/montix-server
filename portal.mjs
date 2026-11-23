@@ -74,6 +74,8 @@ export function tabelle(db) {
   const belegSpalten = new Set(db.prepare('pragma table_info(portal_belege)').all().map((c) => c.name));
   // Online bezahlt (Stripe Checkout): { zeit, betrag, sitzung }
   if (!belegSpalten.has('online')) db.exec('alter table portal_belege add column online text');
+  // Währung des Belegs (ISO 4217), fehlt = EUR
+  if (!belegSpalten.has('waehrung')) db.exec('alter table portal_belege add column waehrung text');
   // Spätere Spalten: Richtung (Kunde oder Betrieb), Absender im Betrieb, Terminwunsch.
   const da = new Set(db.prepare('pragma table_info(portal_nachrichten)').all().map((c) => c.name));
   for (const [spalte, typ] of [['richtung', "text not null default 'kunde'"], ['von_name', 'text'], ['wunsch', 'text']]) if (!da.has(spalte)) db.exec(`alter table portal_nachrichten add column ${spalte} ${typ}`);
@@ -154,10 +156,11 @@ export function portalWeg(methode, pfad, url, wer, koerper, basis) {
       const daten = Buffer.from(String(k.daten ?? ''), 'base64');
       if (daten.length < 100 || daten.length > PDF_MAX || daten.subarray(0, 4).toString('latin1') !== '%PDF') throw new PortalFehler(400, 'Kein PDF oder zu groß (höchstens 15 MB).');
       const betrag = Number(k.betrag);
+      const waehrung = /^[A-Z]{3}$/.test(String(k.waehrung ?? '')) && k.waehrung !== 'EUR' ? k.waehrung : null;
       // Ein neu eingestelltes Angebot (andere Fassung) muss neu angenommen werden — ein altes Ja gilt dann nicht.
       db.prepare(
-        'insert into portal_belege (beleg, kunde, art, nummer, datum, betrag, groesse, daten, eingestellt, von) values (?,?,?,?,?,?,?,?,?,?) on conflict (beleg) do update set kunde = excluded.kunde, art = excluded.art, nummer = excluded.nummer, datum = excluded.datum, betrag = excluded.betrag, groesse = excluded.groesse, daten = excluded.daten, eingestellt = excluded.eingestellt, von = excluded.von, angenommen = case when portal_belege.daten = excluded.daten then portal_belege.angenommen else null end',
-      ).run(beleg, kunde, k.art, text(k.nummer, 40) || null, text(k.datum, 10) || null, Number.isFinite(betrag) ? betrag : null, daten.length, daten, jetzt(), wer.mitarbeiter.id);
+        'insert into portal_belege (beleg, kunde, art, nummer, datum, betrag, groesse, daten, eingestellt, von, waehrung) values (?,?,?,?,?,?,?,?,?,?,?) on conflict (beleg) do update set kunde = excluded.kunde, art = excluded.art, nummer = excluded.nummer, datum = excluded.datum, betrag = excluded.betrag, waehrung = excluded.waehrung, groesse = excluded.groesse, daten = excluded.daten, eingestellt = excluded.eingestellt, von = excluded.von, angenommen = case when portal_belege.daten = excluded.daten then portal_belege.angenommen else null end',
+      ).run(beleg, kunde, k.art, text(k.nummer, 40) || null, text(k.datum, 10) || null, Number.isFinite(betrag) ? betrag : null, daten.length, daten, jetzt(), wer.mitarbeiter.id, waehrung);
       return { ok: true };
     }
     if (pfad === '/portal/beleg/entfernen') {
@@ -186,7 +189,8 @@ export function portalWeg(methode, pfad, url, wer, koerper, basis) {
 const KOPF = { 'cache-control': 'no-store', 'x-robots-tag': 'noindex, nofollow', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff' };
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const tagDe = (iso) => (iso ? String(iso).slice(0, 10).split('-').reverse().join('.') : '');
-const eur = (n) => (Number.isFinite(n) ? `${n.toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.')} €` : '');
+const ZEICHEN = { EUR: '€', GBP: '£', USD: '$', PLN: 'zł', CZK: 'Kč', HUF: 'Ft', RON: 'lei' };
+const eur = (n, waehrung = 'EUR') => (Number.isFinite(n) ? `${n.toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.')} ${ZEICHEN[waehrung ?? 'EUR'] ?? waehrung}` : '');
 const WOCHENTAG = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
 
 function seite(res, status, html) {
@@ -247,7 +251,7 @@ export function portalSeiteDaten(db, kunde, heute = new Date().toISOString().sli
     .sort((a, b) => String(b.datum).localeCompare(String(a.datum)))
     .slice(0, 30);
   const wartungen = alle(db, 'wartungen', kunde).filter((w) => !w.endet || w.endet >= heute);
-  const belege = db.prepare('select beleg, art, nummer, datum, betrag, angenommen, online from portal_belege where kunde = ? order by datum desc, eingestellt desc').all(kunde);
+  const belege = db.prepare('select beleg, art, nummer, datum, betrag, angenommen, online, waehrung from portal_belege where kunde = ? order by datum desc, eingestellt desc').all(kunde);
   // Gesprächsverlauf: die letzten 20 Nachrichten beider Seiten, älteste zuerst.
   const verlauf = db
     .prepare('select n.zeit, n.name, n.text, n.richtung, n.von_name, n.wunsch, d.name as anhang from portal_nachrichten n left join portal_dateien d on d.nachricht = n.id where n.kunde = ? order by n.zeit desc limit 20')
@@ -278,7 +282,7 @@ function kundenSeite(b, p, schluessel, { meldung, fehler, karte = false }) {
   const angebotHtml = angebote
     .map((a) => {
       const an = a.angenommen ? JSON.parse(a.angenommen) : null;
-      return `<div class="zeile"><div class="inhalt"><div class="titel">Angebot ${esc(a.nummer ?? '')}</div><div class="grau">${tagDe(a.datum)}${a.betrag != null ? ` · ${eur(a.betrag)}` : ''}</div>
+      return `<div class="zeile"><div class="inhalt"><div class="titel">Angebot ${esc(a.nummer ?? '')}</div><div class="grau">${tagDe(a.datum)}${a.betrag != null ? ` · ${eur(a.betrag, a.waehrung)}` : ''}</div>
 <a href="${basis}/beleg/${encodeURIComponent(a.beleg)}">PDF ansehen</a>
 ${an ? `<div><span class="marke ok">angenommen von ${esc(an.name)} am ${tagDe(an.zeit)}</span></div>` : `<details><summary>Angebot annehmen</summary><form method="post" action="${basis}"><input type="hidden" name="aktion" value="annehmen"><input type="hidden" name="beleg" value="${esc(a.beleg)}"><label>Ihr Name</label><input type="text" name="name" required maxlength="80" autocomplete="name"><label><input type="checkbox" name="ok" value="1" required> Ich nehme das Angebot ${esc(a.nummer ?? '')} verbindlich an.</label><p><button>Angebot annehmen</button></p></form></details>`}</div></div>`;
     })
@@ -290,7 +294,7 @@ ${an ? `<div><span class="marke ok">angenommen von ${esc(an.name)} am ${tagDe(an
       const status = istBezahlt ? '<span class="marke ok">bezahlt</span>' : '';
       // Online bezahlen nur mit Stripe-Konto des Betriebs und offenem Betrag.
       const zahlen = x.art === 'rechnung' && !istBezahlt && karte && x.betrag >= 0.5 ? `<p><a class="knopf" href="${basis}/bezahlen/${encodeURIComponent(x.beleg)}">Jetzt online bezahlen</a></p>` : '';
-      return `<div class="zeile"><div class="inhalt"><div class="titel">${ARTEN[x.art] ?? 'Beleg'} ${esc(x.nummer ?? '')}</div><div class="grau">${tagDe(x.datum)}${x.betrag != null ? ` · ${eur(x.betrag)}` : ''}</div><a href="${basis}/beleg/${encodeURIComponent(x.beleg)}">PDF ansehen</a>${zahlen}</div>${status}</div>`;
+      return `<div class="zeile"><div class="inhalt"><div class="titel">${ARTEN[x.art] ?? 'Beleg'} ${esc(x.nummer ?? '')}</div><div class="grau">${tagDe(x.datum)}${x.betrag != null ? ` · ${eur(x.betrag, x.waehrung)}` : ''}</div><a href="${basis}/beleg/${encodeURIComponent(x.beleg)}">PDF ansehen</a>${zahlen}</div>${status}</div>`;
     })
     .join('');
 
@@ -369,7 +373,7 @@ export async function portalOeffentlich(speicher, req, res, pfad, url, push, { b
       const s = await zahlung.stripe(stripeSchluessel, 'POST', '/checkout/sessions', {
         mode: 'payment',
         'line_items[0][quantity]': '1',
-        'line_items[0][price_data][currency]': 'eur',
+        'line_items[0][price_data][currency]': (x.waehrung ?? 'EUR').toLowerCase(),
         'line_items[0][price_data][unit_amount]': String(Math.round(x.betrag * 100)),
         'line_items[0][price_data][product_data][name]': `Rechnung ${x.nummer ?? ''}`.trim(),
         success_url: `${zurueck}?ok=bezahlt&sitzung={CHECKOUT_SESSION_ID}`,
@@ -424,7 +428,7 @@ export async function portalOeffentlich(speicher, req, res, pfad, url, push, { b
         if (!x.online) {
           const betrag = (s.amount_total ?? 0) / 100;
           db.prepare('update portal_belege set online = ? where beleg = ?').run(JSON.stringify({ zeit: jetzt(), betrag, sitzung }), x.beleg);
-          pushAnBetrieb(db, push, p, 'Rechnung online bezahlt', `Rechnung ${x.nummer ?? ''} über ${eur(betrag)} ist im Kundenportal bezahlt worden.`);
+          pushAnBetrieb(db, push, p, 'Rechnung online bezahlt', `Rechnung ${x.nummer ?? ''} über ${eur(betrag, x.waehrung)} ist im Kundenportal bezahlt worden.`);
         }
         bezahltMeldung = 'Vielen Dank! Die Zahlung ist eingegangen.';
       } else if (x) bezahltMeldung = 'Die Zahlung ist noch nicht bestätigt. Sie erscheint hier, sobald Stripe sie meldet.';

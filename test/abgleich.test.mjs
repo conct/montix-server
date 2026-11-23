@@ -1438,3 +1438,17 @@ test('Kundenportal: Rechnung online bezahlen über das Stripe-Konto des Betriebs
     globalThis.fetch = echt;
   }
 });
+
+test('Kundenportal: Beleg in fremder Währung zeigt sie an', async () => {
+  const b = speicher.betriebAnlegen('Elektro Franken');
+  const v = (await rufe('/anmelden', { body: { code: speicher.einladen(b, 'Fritz Franken', 'verwalter').code } })).daten;
+  const jetzt = new Date().toISOString();
+  await rufe('/abgleich', { token: v.token, body: { aenderungen: [{ sammlung: 'kunden', id: 'kch', geaendert: jetzt, inhalt: { id: 'kch', party: { name: 'Kunde Zürich' }, updatedAt: jetzt } }] } });
+  const { link } = (await rufe('/portal', { token: v.token, body: { kunde: 'kch' } })).daten;
+  const pdf = Buffer.from('%PDF-1.7\n' + 'c'.repeat(200)).toString('base64');
+  await rufe('/portal/beleg', { token: v.token, body: { kunde: 'kch', beleg: 'rch', art: 'rechnung', nummer: 'RE-9', datum: '2026-11-23', betrag: 1234.5, waehrung: 'CHF', daten: pdf } });
+  await rufe('/portal/beleg', { token: v.token, body: { kunde: 'kch', beleg: 'reu', art: 'rechnung', nummer: 'RE-10', datum: '2026-11-23', betrag: 10, waehrung: 'xx<script>', daten: pdf } });
+  const seite = await (await fetch(basis + new URL(link).pathname)).text();
+  assert.ok(seite.includes('1.234,50 CHF'), 'Franken als Code');
+  assert.ok(seite.includes('10,00 €') && !seite.includes('<script>'), 'ungültige Währung fällt auf Euro zurück');
+});
