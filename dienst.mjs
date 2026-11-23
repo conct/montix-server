@@ -30,6 +30,7 @@ import { erstelleSendmail } from './post.mjs';
 import { unterwegsWeg, WegFehler, wegSeite } from './unterwegs.mjs';
 import { abgelaufeneAufraeumen, FreigabeFehler, freigabeWeg, teilenOeffentlich } from './freigaben.mjs';
 import { erstelleRaeume, RaumFehler } from './raeume.mjs';
+import { PortalFehler, portalOeffentlich, portalWeg } from './portal.mjs';
 import { alarmZiele, erstelleExpoPush, nachricht as pushNachricht, pushWeg, tokensVon } from './push.mjs';
 import { erstelleMail, MailFehler, pythonHelfer } from './mail.mjs';
 import { NachrichtFehler, nachrichtenweg } from './nachrichten.mjs';
@@ -43,7 +44,7 @@ import { karteWeg } from './karte.mjs';
 import { datenPruefen } from './datenstand.mjs';
 import { adressenWeg } from './adressen.mjs';
 import { lueckeMelden } from './hilfe.mjs';
-import { geraeteDb, melden as geraetMelden, liste as geraeteListe, seite as geraeteSeite } from './geraete.mjs';
+import { GERAETE_SEITE, geraeteDb, melden as geraetMelden, liste as geraeteListe } from './geraete.mjs';
 import { erstellePartner, PartnerFehler } from './partner.mjs';
 // Abo und Postfach nur auf dem zentralen Server; im öffentlichen Paket leere Fassungen — siehe anbieter.mjs.
 import { betriebUuid, erstelleAbos, erstellePostfach, KaufFehler } from './anbieter.mjs';
@@ -114,6 +115,54 @@ const FIRMA_ROH = ['firma', 'logo', 'farben'];
 export const RECHT_EINKAUF = 'recht:einkauf';
 export const RECHT_LAGER = 'recht:lager';
 const darfEinkauf = (m) => m.rolle === 'verwalter' || hatRecht(m, RECHT_EINKAUF);
+/**
+ * Zeiterfassung (src/features/zeiten): Jeder schreibt und liest nur die eigenen Einträge (id beginnt
+ * mit der eigenen Mitarbeiter-ID). Verwalter und das Recht „Arbeitszeiten aller“ sehen und
+ * korrigieren alle, legen Verträge an und geben Monate frei. Gelöscht wird nie (Aufbewahrung,
+ * § 16 ArbZG) — die App storniert stattdessen.
+ */
+export const RECHT_ZEITEN = 'recht:zeiten';
+export const darfAlleZeiten = (m) => m.rolle === 'verwalter' || hatRecht(m, RECHT_ZEITEN);
+const eigeneZeit = (a, m) => a.id.startsWith(`${m.id}_`) && (a.geloescht || a.inhalt?.mitarbeiter === m.id);
+/** Monat eines Arbeitsblocks bzw. einer Abwesenheit, in deutscher Zeit (wie die App). */
+const monatDerZeit = (z) => (z?.art === 'arbeit' ? new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit' }).format(new Date(z.beginn)) : String(z?.beginn ?? '')).slice(0, 7);
+/**
+ * Was eine Person ohne „Arbeitszeiten aller“ an `zeiten` schreiben darf: eigene Blöcke und
+ * Abwesenheiten, solange der Monat nicht freigegeben ist, und die eigene Bestätigung des Monats —
+ * nie den Vertrag und nie eine Freigabe.
+ */
+function zeitErlaubt(a, m, db) {
+  if (a.geloescht) return false;
+  if (darfAlleZeiten(m)) return true;
+  if (!eigeneZeit(a, m)) return false;
+  const z = a.inhalt;
+  const gespeichert = (id) => {
+    const r = db?.prepare("select inhalt from daten where sammlung = 'zeiten' and id = ? and geloescht = 0").get(id);
+    return r ? JSON.parse(r.inhalt) : null;
+  };
+  if (z.art === 'vertrag') return false;
+  if (z.art === 'freigabe') {
+    const alt = gespeichert(a.id);
+    return !z.freigegeben && !alt?.freigegeben;
+  }
+  const freigegeben = (monat) => !!gespeichert(`${m.id}_freigabe_${monat}`)?.freigegeben;
+  const vorher = gespeichert(a.id);
+  return !freigegeben(monatDerZeit(z)) && !(vorher && freigegeben(monatDerZeit(vorher)));
+}
+
+/** Lesen: Zeiten anderer nur mit dem Recht; das Verbandbuch (Gesundheitsdaten) nur der Verwalter, sonst die eigenen Einträge. */
+export function zeitenFiltern(ergebnis, m) {
+  const alleZeiten = darfAlleZeiten(m);
+  if (alleZeiten && m.rolle === 'verwalter') return ergebnis;
+  return {
+    ...ergebnis,
+    aenderungen: ergebnis.aenderungen.filter((a) => {
+      if (a.sammlung === 'zeiten') return alleZeiten || a.id.startsWith(`${m.id}_`);
+      if (a.sammlung === 'verbandbuch') return m.rolle === 'verwalter' || a.id.startsWith(`${m.id}_`) || (!a.geloescht && a.inhalt?.person?.id === m.id);
+      return true;
+    }),
+  };
+}
 const darfLager = (m) => m.rolle === 'verwalter' || m.bereiche === null || m.bereiche === undefined || hatRecht(m, RECHT_LAGER);
 
 export function erlaubte(liste, mitarbeiter, db) {
@@ -129,6 +178,7 @@ export function erlaubte(liste, mitarbeiter, db) {
     }
     if (a.sammlung === 'schritte') return a.id.startsWith(`${mitarbeiter.id}_`) && (a.geloescht || a.inhalt.mitarbeiter === mitarbeiter.id);
     if (a.sammlung === 'aktionen') return mitarbeiter.rolle === 'verwalter';
+    if (a.sammlung === 'zeiten') return zeitErlaubt(a, mitarbeiter, db);
     // Fremdfahrer schreiben nur Ereignisse ihrer eigenen Touren, sonst nichts.
     // Eigene Meldungen darf man zurücknehmen (Grabstein): geprüft am gespeicherten Absender.
     const eigeneMeldung = () => (a.geloescht ? (() => {
@@ -144,6 +194,11 @@ export function erlaubte(liste, mitarbeiter, db) {
     // Firmendaten, Logo und Firmenfarben ändert nur ein Verwalter — sonst trüge ein Mitarbeiter einen
     // anderen Absender auf allen Geräten des Betriebs ein.
     if (a.sammlung === 'roh' && FIRMA_ROH.includes(a.id)) return mitarbeiter.rolle === 'verwalter';
+    // Arbeitsschutz: Gefährdungsbeurteilungen und Nachweise der Leute pflegt der Verwalter (sonst
+    // trüge sich jemand selbst einen Staplerschein ein); Unterweisungen darf jeder eintragen.
+    if (a.sammlung === 'gefaehrdungen' || a.sammlung === 'nachweise' || a.sammlung === 'gefahrstoffe') return mitarbeiter.rolle === 'verwalter';
+    // Verbandbuch: jeder trägt ein (Kennung beginnt mit der eigenen ID), ändern nur eigene oder der Verwalter.
+    if (a.sammlung === 'verbandbuch') return mitarbeiter.rolle === 'verwalter' || a.id.startsWith(`${mitarbeiter.id}_`);
     return true;
   });
 }
@@ -300,9 +355,10 @@ export function erstelleDienst(
         return antwort(res, ok ? 200 : 400, ok ? { ok: true } : { fehler: 'Angaben unvollständig' });
       }
       if (req.method === 'GET' && pfad === '/geraete.json') return antwort(res, 200, { geraete: geraeteListe(geraeteDb(speicher.speicherOrt ?? ordner)) });
-      if (req.method === 'GET' && pfad === '/geraete') {
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'max-age=600' });
-        return res.end(geraeteSeite(geraeteDb(speicher.speicherOrt ?? ordner)));
+      // Die Seite dazu steht im Design der Website auf feif.space und liest /geraete.json.
+      if ((req.method === 'GET' || req.method === 'HEAD') && (pfad === '/geraete' || pfad === '/geraete/')) {
+        res.writeHead(301, { location: GERAETE_SEITE });
+        return res.end();
       }
 
       // Touren: öffentliche Seite für den Empfänger einer Lieferung — siehe touren.mjs.
@@ -337,6 +393,9 @@ export function erstelleDienst(
 
       // Objektraum: Seite eines Teilnehmers (andere Firma, Auftraggeber) — siehe raeume.mjs.
       if (pfad.startsWith('/objekt/') && (await raeume.oeffentlich(speicher, req, res, pfad, url, () => basisVon(req)))) return;
+
+      // Kundenportal: Seite des Kunden — siehe portal.mjs.
+      if (pfad.startsWith('/kunde/') && (await portalOeffentlich(speicher, req, res, pfad, url, push))) return;
 
       // Adressvorschläge beim Tippen (auch ohne Anmeldung, auch Einzelplatz) — siehe adresse.mjs.
       if (req.method === 'GET' && pfad === '/adresse/info') return antwort(res, 200, adresseInfo());
@@ -662,6 +721,15 @@ export function erstelleDienst(
         throw e;
       }
 
+      // Kundenportal (Betrieb) — siehe portal.mjs.
+      try {
+        const pw = portalWeg(req.method, pfad, url, wer, (grenze) => koerper(req, grenze), basisVon(req));
+        if (pw !== undefined) return antwort(res, 200, await pw);
+      } catch (e) {
+        if (e instanceof PortalFehler) throw new Fehler(e.status, e.message);
+        throw e;
+      }
+
       // Push-Token dieses Geräts — siehe push.mjs.
       const pw = pushWeg(req.method, pfad, wer, () => koerper(req), hash(token));
       if (pw !== undefined) {
@@ -695,7 +763,8 @@ export function erstelleDienst(
         const seit = Number(url.searchParams.get('seit') ?? 0);
         if (!Number.isInteger(seit) || seit < 0) throw new Fehler(400, 'seit muss eine Zahl sein');
         const gelesen = speicher.lesen(wer.db, seit);
-        return antwort(res, 200, wer.mitarbeiter.rolle === 'fremdfahrer' || wer.mitarbeiter.rolle === 'partner' ? fuerFremdfahrer(gelesen, wer.mitarbeiter.id, wer.db) : gelesen);
+        if (wer.mitarbeiter.rolle === 'fremdfahrer' || wer.mitarbeiter.rolle === 'partner') return antwort(res, 200, fuerFremdfahrer(gelesen, wer.mitarbeiter.id, wer.db));
+        return antwort(res, 200, zeitenFiltern(gelesen, { ...wer.mitarbeiter, bereiche: wer.roh?.bereiche ?? null }));
       }
 
       if (req.method === 'POST' && pfad === '/abgleich') {

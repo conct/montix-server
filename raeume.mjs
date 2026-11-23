@@ -581,3 +581,6 @@ async function formular(req) {
   }
   return felder;
 }
+
+/** Auch für das Kundenportal (Anhang an einer Nachricht, Feld „foto“). */
+export { formular as formularMitDatei };

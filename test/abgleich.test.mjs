@@ -338,6 +338,71 @@ test('Bewegung: Schritte nur für sich selbst, Aktionen nur vom Verwalter', asyn
   assert.ok(ids.includes('a1'));
 });
 
+test('Zeiterfassung: nur eigene Zeiten, Recht „Arbeitszeiten aller“, kein Löschen', async () => {
+  const chef = await geraet('Zora', 'verwalter');
+  const ma = await geraet('Uwe', 'mitarbeiter');
+  const buero = await geraet('Ina', 'mitarbeiter');
+  const zeit = (m, id, inhalt = {}) => ({ sammlung: 'zeiten', id: `${m.mitarbeiter.id}_${id}`, geaendert: t(1), inhalt: { mitarbeiter: m.mitarbeiter.id, art: 'arbeit', beginn: t(0), ...inhalt } });
+  const eigen = zeit(ma, 'a');
+  const untergeschoben = { ...zeit(ma, 'b'), inhalt: { mitarbeiter: chef.mitarbeiter.id, art: 'arbeit', beginn: t(0) } };
+  const fremd = zeit(chef, 'c');
+  await rufe('/abgleich', { token: ma.token, body: { aenderungen: [eigen, untergeschoben, fremd] } });
+  await rufe('/abgleich', { token: chef.token, body: { aenderungen: [zeit(chef, 'd'), zeit(buero, 'e')] } });
+  // Löschen nimmt der Server nicht an, auch nicht vom Verwalter.
+  await rufe('/abgleich', { token: chef.token, body: { aenderungen: [{ sammlung: 'zeiten', id: eigen.id, geaendert: t(5), geloescht: true }] } });
+  const ids = async (token) => {
+    const alles = [];
+    for (let seit = 0, mehr = true; mehr; ) {
+      const d = (await rufe(`/abgleich?seit=${seit}`, { token })).daten;
+      alles.push(...d.aenderungen);
+      ({ mehr } = d);
+      seit = d.rev;
+    }
+    return alles.filter((a) => a.sammlung === 'zeiten' && !a.geloescht).map((a) => a.id);
+  };
+  assert.deepEqual((await ids(ma.token)).sort(), [eigen.id]);
+  assert.deepEqual((await ids(chef.token)).sort(), [eigen.id, `${chef.mitarbeiter.id}_d`, `${buero.mitarbeiter.id}_e`].sort());
+  assert.deepEqual(await ids(buero.token), [`${buero.mitarbeiter.id}_e`]);
+  // Mit dem Recht sieht das Büro alle.
+  assert.equal((await rufe('/mitarbeiter/rechte', { token: chef.token, body: { id: buero.mitarbeiter.id, bereiche: ['report', 'recht:zeiten'] } })).status, 200);
+  assert.equal((await ids(buero.token)).length, 3);
+});
+
+test('Zeiterfassung: Vertrag und Freigabe nur mit Recht, freigegebener Monat gesperrt', async () => {
+  const chef = await geraet('Vera', 'verwalter');
+  const ma = await geraet('Olaf', 'mitarbeiter');
+  const id = ma.mitarbeiter.id;
+  const zeiten = async (token) => {
+    const alles = [];
+    for (let seit = 0, mehr = true; mehr; ) {
+      const d = (await rufe(`/abgleich?seit=${seit}`, { token })).daten;
+      alles.push(...d.aenderungen);
+      ({ mehr } = d);
+      seit = d.rev;
+    }
+    return new Map(alles.filter((a) => a.sammlung === 'zeiten' && a.inhalt?.mitarbeiter === id).map((a) => [a.id, a.inhalt]));
+  };
+  const z = (zid, inhalt, s = 1) => ({ sammlung: 'zeiten', id: `${id}_${zid}`, geaendert: t(s), inhalt: { mitarbeiter: id, ...inhalt } });
+  const block = (zid, beginn, s = 1) => z(zid, { art: 'arbeit', beginn }, s);
+  // Eigener Vertrag und eigene Freigabe werden still übergangen, Bestätigung geht.
+  await rufe('/abgleich', { token: ma.token, body: { aenderungen: [z('vertrag', { art: 'vertrag', perioden: [] }), z('freigabe_2026-10', { art: 'freigabe', monat: '2026-10', freigegeben: { von: 'Olaf' } }), z('freigabe_2026-11', { art: 'freigabe', monat: '2026-11', bestaetigt: { von: 'Olaf' } }), block('a', '2026-10-05T06:00:00.000Z')] } });
+  let m = await zeiten(chef.token);
+  assert.ok(!m.has(`${id}_vertrag`));
+  assert.ok(!m.has(`${id}_freigabe_2026-10`));
+  assert.ok(m.get(`${id}_freigabe_2026-11`)?.bestaetigt);
+  assert.ok(m.has(`${id}_a`));
+  // Der Verwalter gibt Oktober frei; danach ändert Olaf dort nichts mehr und trägt nichts nach.
+  await rufe('/abgleich', { token: chef.token, body: { aenderungen: [z('vertrag', { art: 'vertrag', perioden: [{ ab: '2026-10-01', wochenstunden: 40, tage: [1, 2, 3, 4, 5], urlaubJahr: 30 }] }), z('freigabe_2026-10', { art: 'freigabe', monat: '2026-10', freigegeben: { von: 'Vera' } })] } });
+  await rufe('/abgleich', { token: ma.token, body: { aenderungen: [block('a', '2026-10-05T05:00:00.000Z', 9), block('b', '2026-10-06T06:00:00.000Z'), block('c', '2026-11-02T06:00:00.000Z')] } });
+  m = await zeiten(chef.token);
+  assert.equal(m.get(`${id}_a`).beginn, '2026-10-05T06:00:00.000Z', 'freigegebener Monat bleibt');
+  assert.ok(!m.has(`${id}_b`), 'kein Nachtrag im freigegebenen Monat');
+  assert.ok(m.has(`${id}_c`), 'offener Monat geht');
+  assert.ok(m.has(`${id}_vertrag`));
+  // Olaf sieht seinen Vertrag (lesen darf er).
+  assert.ok((await zeiten(ma.token)).has(`${id}_vertrag`));
+});
+
 test('Alleinarbeit: Frist, Bestätigung, Fristalarm, Notruf, Kümmern, Ende', async () => {
   const ma = await geraet('Ali', 'mitarbeiter');
   const kollege = await geraet('Kim', 'mitarbeiter');
@@ -1219,4 +1284,88 @@ test('Einkauf: Lieferanten nur mit Recht „Einkauf“, Bestellungen auch mit �
   const ids = (s) => alle.filter((a) => a.sammlung === s).map((a) => a.id).sort();
   assert.deepEqual(ids('lieferanten'), ['L-chef', 'L-einkauf']);
   assert.deepEqual(ids('bestellungen'), ['B-chef', 'B-einkauf', 'B-lager', 'B-voll']);
+});
+
+test('Kundenportal: Link je Kunde, Termine und Berichte aus dem Abgleich, Angebot annehmen, Nachricht, Widerruf', async () => {
+  const b = speicher.betriebAnlegen('Elektro Portal');
+  const v = (await rufe('/anmelden', { body: { code: speicher.einladen(b, 'Paula Portal', 'verwalter').code } })).daten;
+  const morgen = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  const pdf = Buffer.from('%PDF-1.7\n' + 'x'.repeat(200)).toString('base64');
+  const jetzt = new Date().toISOString();
+  const e = (sammlung, inhalt) => ({ sammlung, id: inhalt.id, geaendert: jetzt, inhalt: { ...inhalt, updatedAt: jetzt } });
+  await rufe('/abgleich', {
+    token: v.token,
+    body: {
+      aenderungen: [
+        e('kunden', { id: 'kp', party: { name: 'Familie Kunz' } }),
+        e('kunden', { id: 'kx', party: { name: 'Andere' } }),
+        e('termine', { id: 'tm1', kundeId: 'kp', titel: 'Zählerschrank tauschen', start: `${morgen}T08:00`, dauerMin: 120 }),
+        e('termine', { id: 'tm2', kundeId: 'kx', titel: 'Fremder Termin', start: `${morgen}T09:00`, dauerMin: 60 }),
+        e('termine', { id: 'tm3', kundeId: 'kp', titel: 'Alter Termin', start: '2020-01-01T08:00', dauerMin: 60 }),
+        e('berichte', { id: 'br1', kundeId: 'kp', datum: '2026-11-20', taetigkeiten: 'Steckdosen gesetzt', status: 'abgeschlossen', pdf: 'file:///x/bericht-br1.pdf' }),
+        { sammlung: 'dateien', id: 'bericht-br1.pdf', geaendert: jetzt, inhalt: { daten: pdf } },
+      ],
+    },
+  });
+  assert.equal((await rufe('/portal', { token: v.token, body: { kunde: 'gibtsnicht' } })).status, 404);
+  const { link } = (await rufe('/portal', { token: v.token, body: { kunde: 'kp' } })).daten;
+  assert.match(link, /\/kunde\/k[\w-]{22}$/);
+  const p = new URL(link).pathname;
+  assert.equal((await rufe('/portal/beleg', { token: v.token, body: { kunde: 'kp', beleg: 'an1', art: 'angebot', nummer: 'AN-7', datum: '2026-11-21', betrag: 1234.5, daten: Buffer.from('kein pdf').toString('base64') } })).status, 400);
+  assert.equal((await rufe('/portal/beleg', { token: v.token, body: { kunde: 'kp', beleg: 'an1', art: 'angebot', nummer: 'AN-7', datum: '2026-11-21', betrag: 1234.5, daten: pdf } })).status, 200);
+
+  let seite = await (await fetch(basis + p)).text();
+  assert.ok(seite.includes('Zählerschrank tauschen') && !seite.includes('Fremder Termin') && !seite.includes('Alter Termin'));
+  assert.ok(seite.includes('Angebot AN-7') && seite.includes('1.234,50 €') && seite.includes('Arbeitsbericht vom 20.11.2026'));
+  assert.equal((await fetch(`${basis}${p}/beleg/an1`)).headers.get('content-type'), 'application/pdf');
+  assert.equal((await fetch(`${basis}${p}/bericht/br1`)).status, 200);
+  assert.equal((await fetch(`${basis}${p}/bericht/gibtsnicht`)).status, 404);
+
+  const form = (felder) => fetch(basis + p, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(felder).toString() });
+  pushes.length = 0;
+  assert.ok((await (await form({ aktion: 'annehmen', beleg: 'an1', name: 'Karl Kunz' })).text()).includes('Häkchen'));
+  assert.equal((await form({ aktion: 'annehmen', beleg: 'an1', name: 'Karl Kunz', ok: '1' })).status, 303);
+  assert.equal((await form({ aktion: 'nachricht', name: 'Karl', text: 'Bitte vorher anrufen', rueckruf: '0351 123' })).status, 303);
+  assert.equal(pushes.length, 0, 'ohne Push-Token keine Mitteilung, aber kein Fehler');
+  seite = await (await fetch(`${basis}${p}?ok=angenommen`)).text();
+  assert.ok(seite.includes('angenommen von Karl Kunz') && seite.includes('Vielen Dank'));
+
+  const stand = (await rufe('/portal?kunde=kp', { token: v.token })).daten;
+  assert.equal(stand.link, link);
+  assert.equal(stand.belege[0].angenommen.name, 'Karl Kunz');
+  assert.equal(stand.nachrichten[0].text, 'Bitte vorher anrufen');
+  assert.ok(stand.abrufe >= 2);
+  // Terminwunsch (ab morgen), Anhang an der Nachricht (multipart), Antwort des Betriebs im Verlauf.
+  assert.ok((await (await form({ aktion: 'termin', datum: '2020-01-01', text: 'x' })).text()).includes('ab morgen'));
+  assert.equal((await form({ aktion: 'termin', datum: morgen, zeit: 'vormittags', text: 'Heizung rauscht', name: 'Karl' })).status, 303);
+  const fd = new FormData();
+  fd.append('aktion', 'nachricht');
+  fd.append('text', 'Foto vom Schaden');
+  fd.append('foto', new Blob([Buffer.from('%PDF-1.7\n' + 'z'.repeat(300))], { type: 'application/pdf' }), 'schaden.pdf');
+  assert.equal((await fetch(basis + p, { method: 'POST', redirect: 'manual', body: fd })).status, 303);
+  const fd2 = new FormData();
+  fd2.append('aktion', 'nachricht');
+  fd2.append('text', 'falsch');
+  fd2.append('foto', new Blob(['MZ'], { type: 'application/x-msdownload' }), 'virus.exe');
+  assert.ok((await (await fetch(basis + p, { method: 'POST', redirect: 'manual', body: fd2 })).text()).includes('nur Fotos'));
+  assert.equal((await rufe('/portal/antwort', { token: v.token, body: { kunde: 'kp', text: 'Wir kommen Dienstag.' } })).status, 200);
+  const mitAntwort = (await rufe('/portal?kunde=kp', { token: v.token })).daten;
+  assert.equal(mitAntwort.nachrichten[0].richtung, 'betrieb');
+  assert.equal(mitAntwort.nachrichten[0].vonName, 'Paula Portal');
+  const anhang = mitAntwort.nachrichten.find((n) => n.text === 'Foto vom Schaden').anhang;
+  assert.equal(anhang.typ, 'application/pdf');
+  assert.ok(Buffer.from((await rufe(`/portal/datei?id=${anhang.id}`, { token: v.token })).daten.daten, 'base64').toString('latin1').startsWith('%PDF'));
+  assert.deepEqual(mitAntwort.nachrichten.find((n) => n.wunsch).wunsch, { datum: morgen, zeit: 'vormittags' });
+  seite = await (await fetch(basis + p)).text();
+  assert.ok(seite.includes('Wir kommen Dienstag.') && seite.includes('Terminwunsch:') && seite.includes('Anhang: Anhang-'));
+  // Neue Fassung des Angebots: die alte Annahme gilt nicht mehr.
+  await rufe('/portal/beleg', { token: v.token, body: { kunde: 'kp', beleg: 'an1', art: 'angebot', nummer: 'AN-7', datum: '2026-11-22', betrag: 1300, daten: Buffer.from('%PDF-1.7\n' + 'y'.repeat(200)).toString('base64') } });
+  assert.equal((await rufe('/portal?kunde=kp', { token: v.token })).daten.belege[0].angenommen, null);
+
+  // Ein anderer Betrieb sieht das Portal nicht; Widerruf macht den Link tot.
+  const fremd = (await rufe('/anmelden', { body: { code: speicher.einladen(betrieb, 'Fremd', 'verwalter').code } })).daten;
+  assert.equal((await rufe('/portal?kunde=kp', { token: fremd.token })).daten.link, null);
+  await rufe('/portal/widerrufen', { token: v.token, body: { kunde: 'kp' } });
+  assert.equal((await fetch(basis + p)).status, 404);
+  assert.equal((await rufe('/portal?kunde=kp', { token: v.token })).daten.link, null);
 });

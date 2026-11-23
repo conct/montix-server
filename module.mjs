@@ -1,10 +1,14 @@
-// Buchbare Zusatzmodule je Betrieb (heute nur `kasse`, die Barkasse mit TSE) — mit Anzahl: Bei der
+// Buchbare Zusatzmodule je Betrieb (`kasse`, die Barkasse mit TSE) — mit Anzahl: Bei der
 // Barkasse ist jedes Gerät, das Bargeld erfasst, eine eigene Kasse (eigener TSE-Client), gebucht
 // wird also je Kasse. Auf dem zentralen Server setzt der Anbieter die Anzahl — in der Verwaltung
 // (postfach.mjs, „Betriebe“) oder mit `node verwalten.mjs modul <betrieb> kasse <anzahl>` (0 =
 // abbestellt). Auf einem eigenen Server eines Betriebs braucht es keine Buchung.
+//
+// `mehrplatz` ist kein Modul, sondern ein Vermerk: Der Betrieb hat eine gekaufte Mehrplatz-Lizenz
+// (Anzahl = Plätze). Die Lizenz selbst ist ein Schlüssel auf den Geräten, den der Server nicht
+// sieht; der Vermerk sorgt dafür, dass die Monatsrechnung die Modulpreise von Einzel Plus nimmt.
 
-export const MODULE = { kasse: 'Barkasse mit TSE' };
+export const MODULE = { kasse: 'Barkasse mit TSE', mehrplatz: 'Mehrplatz-Lizenz (Modulpreise wie Einzel Plus)' };
 
 const tabelle = (db) => db.exec('create table if not exists module (id text primary key, anzahl integer not null, gebucht text not null, von text)');
 

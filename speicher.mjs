@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 /** Was die App abgleichen darf. Alles andere weist der Server ab. */
-export const SAMMLUNGEN = ['kunden', 'artikel', 'termine', 'plaene', 'berichte', 'unterschriften', 'belege', 'sprachnotizen', 'schritte', 'aktionen', 'zeichnungen', 'lager', 'etiketten', 'ankuenfte', 'leergut', 'lieferanten', 'bestellungen', 'touren', 'tourereignisse', 'roh', 'dateien'];
+export const SAMMLUNGEN = ['kunden', 'artikel', 'termine', 'plaene', 'berichte', 'unterschriften', 'belege', 'sprachnotizen', 'schritte', 'aktionen', 'zeichnungen', 'lager', 'etiketten', 'ankuenfte', 'leergut', 'lieferanten', 'bestellungen', 'touren', 'tourereignisse', 'zeiten', 'wartungen', 'projekte', 'bautagebuch', 'inventar', 'pruefungen', 'unterweisungen', 'gefaehrdungen', 'nachweise', 'verbandbuch', 'gefahrstoffe', 'roh', 'dateien'];
 
 /** Kennung eines NFC-Etiketts (UID) einheitlich: Großbuchstaben, nur Hex-Ziffern. */
 export const kennungNorm = (k) => String(k ?? '').toUpperCase().replace(/[^0-9A-F]/g, '');
