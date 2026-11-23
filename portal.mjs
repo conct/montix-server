@@ -231,7 +231,7 @@ function zuViel(id) {
 /** Bezahlt laut Zahlungen am abgeglichenen Beleg? */
 function bezahlt(db, belegId, betrag) {
   const b = inhalt(db, 'belege', belegId);
-  const summe = (b?.zahlungen ?? []).reduce((s, z) => s + (Number(z.betrag) || 0), 0);
+  const summe = (b?.zahlungen ?? []).reduce((s, z) => s + (Number(z.betrag) || 0) + (Number(z.skonto) || 0), 0);
   return betrag > 0 && summe >= betrag - 0.005;
 }
 
