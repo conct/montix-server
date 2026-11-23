@@ -77,6 +77,7 @@ Geräte).
 | `MONTIX_KARTE_QUELLE` | `https://montix.feif.space/karte/karte.pmtiles` | Woher `node verwalten.mjs karte` die Datei holt |
 | `TSE_ANBIETER`, `TSE_API_KEY`, `TSE_API_SECRET`, `TSE_TSS_ID` | leer | Barkasse: Vorgabe für die TSE bei fiskaly (sonst in der App einrichten) |
 | `MONTIX_EZB` | an | `aus`: keine EZB-Referenzkurse holen (dann zeigt die App bei Fremdwährung keinen ungefähren Euro-Betrag) |
+| `MONTIX_BMF` | an | `aus`: keine Umsatzsteuer-Umrechnungskurse beim BMF holen (dann gelten nur die Kurse, die die App mitbringt) |
 
 ## Was den Server verlässt
 
@@ -87,6 +88,7 @@ Geräte).
 - **Barkasse**: die Signaturanfragen an fiskaly, wenn eine TSE eingerichtet ist.
 - **Kartenzahlung und Online-Zahlung im Kundenportal**: Anfragen an Stripe mit dem Schlüssel Ihres Stripe-Kontos, wenn Sie einen hinterlegt haben. Offene Zahlungen fragt der Server bis zu 24 Stunden lang selbst bei Stripe nach.
 - **Wechselkurse**: höchstens zweimal am Tag ein Abruf der Referenzkurse bei der Europäischen Zentralbank (`ecb.europa.eu`), ohne Daten von Ihnen. Abschalten mit `MONTIX_EZB=aus`.
+- **Umsatzsteuer-Umrechnungskurse**: einmal am Tag ein Blick auf die Seite des Bundesfinanzministeriums (`bundesfinanzministerium.de`); nur wenn es ein neues Schreiben gibt, lädt der Server das PDF. Ohne Daten von Ihnen. Abschalten mit `MONTIX_BMF=aus`.
 - **Partnerbetriebe**: übernimmt Ihr Betrieb eine Tour einer anderen Firma, schickt der Server deren
   Server die Meldungen und die Position zu dieser Tour.
 - **Fehler melden** in der App: Diese Meldung geht per Mail an den Montix-Support, damit wir

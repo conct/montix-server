@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -29,7 +29,7 @@ test('EZB-Kurse: GET /kurse für Angemeldete über den Dienst', async () => {
   const { oeffneSpeicher } = await import('../speicher.mjs');
   const sp = oeffneSpeicher(':memory:');
   const b = sp.betriebAnlegen('Kurs GmbH');
-  const srv = erstelleDienst(sp, { zeitgeber: false, ordner: mkdtempSync(join(tmpdir(), 'kurse-dienst-')), senden: () => {}, push: async () => {}, kurseHolen: async () => new Response(XML) });
+  const srv = erstelleDienst(sp, { zeitgeber: false, ordner: mkdtempSync(join(tmpdir(), 'kurse-dienst-')), senden: () => {}, push: async () => {}, kurseHolen: async () => new Response(XML), bmfHolen: async (url) => (url.includes('.pdf') ? new Response(readFileSync(new URL('./bmf-2026-11-02.pdf', import.meta.url))) : new Response('<a href="Content/DE/Downloads/BMF_Schreiben/Steuerarten/Umsatzsteuer/Umsatzsteuer-Umrechnungskurse/2026-11-02-umsatzsteuer-umrechnungskurse-2026.pdf">x</a>')) });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   const basis = `http://127.0.0.1:${srv.address().port}`;
   try {
@@ -38,6 +38,8 @@ test('EZB-Kurse: GET /kurse für Angemeldete über den Dienst', async () => {
     const k = await (await fetch(`${basis}/kurse`, { headers: { authorization: `Bearer ${anmelden.token}` } })).json();
     assert.equal(k.datum, '2026-11-20');
     assert.equal(k.kurse.CHF, 0.9282);
+    assert.equal(k.bmf.stand, '2026-11-02');
+    assert.equal(k.bmf.kurse['2026-10'].CHF, 0.9282, 'BMF-Kurse kommen mit');
   } finally {
     srv.close();
   }

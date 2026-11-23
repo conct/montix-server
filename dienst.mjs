@@ -35,6 +35,7 @@ import { alarmZiele, erstelleExpoPush, nachricht as pushNachricht, pushWeg, toke
 import { erstelleMail, MailFehler, pythonHelfer } from './mail.mjs';
 import { NachrichtFehler, nachrichtenweg } from './nachrichten.mjs';
 import { erstelleZahlung, ZahlFehler } from './zahlung.mjs';
+import { erstelleBmf } from './bmf.mjs';
 import { erstelleKurse } from './kurse.mjs';
 import { erstelleKasse, hatRecht, KassenDatei, KassenFehler } from './kasse.mjs';
 import { fehlerMelden } from './fehler.mjs';
@@ -236,6 +237,8 @@ export function erstelleDienst(
     aboHolen = fetch,
     // EZB-Referenzkurse zur Orientierung (kurse.mjs); in Tests ein Fänger statt fetch.
     kurseHolen = fetch,
+    // BMF-Umsatzsteuer-Umrechnungskurse (bmf.mjs); in Tests ein Fänger statt fetch.
+    bmfHolen = fetch,
     // Mail-Client je Mitarbeiter (IMAP/SMTP über mail-helfer.py); in Tests ein Fänger.
     mailHelfer = pythonHelfer,
     // Barkasse: TSE_* als Vorgabe auf einem eigenen Server; in Tests ein Fänger statt https zu fiskaly.
@@ -247,6 +250,7 @@ export function erstelleDienst(
 ) {
   const zahlungsweg = erstelleZahlung(speicher.speicherOrt ?? ordner);
   const kurse = erstelleKurse(speicher.speicherOrt ?? ordner, { holen: kurseHolen });
+  const bmf = erstelleBmf(speicher.speicherOrt ?? ordner, { holen: bmfHolen });
   // Zentrales Hosting (AVV-Pflicht) = feste 15 Minuten für die Sammelmail, außer mit Serverpaket.
   const raeume = erstelleRaeume({ ordner: speicher.speicherOrt ?? ordner, senden, push, zentral: vertragPflicht });
   // Öffentliche Adresse des Dienstes (für Links in Mails); ohne Umgebung die zuletzt gesehene.
@@ -591,8 +595,11 @@ export function erstelleDienst(
         return antwort(res, 200, { ok: true });
       }
 
-      // EZB-Referenzkurse zur Orientierung (nie für Belege) — siehe kurse.mjs.
-      if (pfad === '/kurse' && req.method === 'GET') return antwort(res, 200, (await kurse.auffrischen()) ?? { kurse: null });
+      // Kurse: EZB-Referenzkurse zur Orientierung (kurse.mjs) und die BMF-Umsatzsteuer-Umrechnungskurse (bmf.mjs).
+      if (pfad === '/kurse' && req.method === 'GET') {
+        const [ezb, ust] = await Promise.all([kurse.auffrischen(), bmf.auffrischen()]);
+        return antwort(res, 200, { ...(ezb ?? { kurse: null }), bmf: ust ? { stand: ust.stand, kurse: ust.kurse } : null });
+      }
 
       // Kartenzahlung (Stripe Terminal) über das Konto des Betriebs — siehe zahlung.mjs.
       try {
@@ -908,6 +915,9 @@ export function erstelleDienst(
       if (++minuten % 60 === 0) {
         aufraeumen();
         void abos.auffrischen();
+        // Kurse vorab holen, damit /kurse nicht warten muss (BMF höchstens einmal am Tag, EZB zweimal).
+        void bmf.auffrischen();
+        void kurse.auffrischen();
         void postfach.rechnungenLauf?.();
         // Eigener Server: neue Karten-/Adressdaten? Einmal am Tag (und nachts zum automatischen Holen stündlich).
         const h = new Date().getHours();
@@ -923,6 +933,7 @@ export function erstelleDienst(
   server.postVerschicken = postVerschicken;
   server.termineErinnern = termineErinnern;
   server.kurse = kurse;
+  server.bmf = bmf;
   server.offeneZahlungenPruefen = () => offeneZahlungenPruefen(speicher, zahlungsweg, push);
   return server;
 }
