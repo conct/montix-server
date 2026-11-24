@@ -131,8 +131,28 @@ const monatDerZeit = (z) => (z?.art === 'arbeit' ? new Intl.DateTimeFormat('sv-S
 /**
  * Was eine Person ohne „Arbeitszeiten aller“ an `zeiten` schreiben darf: eigene Blöcke und
  * Abwesenheiten, solange der Monat nicht freigegeben ist, und die eigene Bestätigung des Monats —
- * nie den Vertrag und nie eine Freigabe.
+ * nie den Vertrag und nie eine Freigabe. Urlaubsanträge: nie selbst genehmigen oder ablehnen (ein
+ * entschiedener Antrag bleibt nur, solange Zeitraum und Entscheidung unverändert sind); verlangt der
+ * Betrieb Anträge (Firmendaten `urlaubsantrag`), nimmt der Server neuen Urlaub nur als offenen Antrag.
  */
+const urlaubsantragNoetig = (db) => {
+  try {
+    const r = db?.prepare("select inhalt from daten where sammlung = 'roh' and id = 'firma' and geloescht = 0").get();
+    const daten = r ? JSON.parse(r.inhalt)?.daten : null;
+    return !!(typeof daten === 'string' ? JSON.parse(daten) : daten)?.urlaubsantrag;
+  } catch {
+    return false;
+  }
+};
+function urlaubErlaubt(z, vorher, db) {
+  if (z.art !== 'urlaub' || z.storniert) return true;
+  const gleich = !!vorher && vorher.art === 'urlaub' && vorher.beginn === z.beginn && (vorher.ende ?? vorher.beginn) === (z.ende ?? z.beginn);
+  const status = z.antrag?.status;
+  if (status === 'genehmigt' || status === 'abgelehnt') return gleich && vorher.antrag?.status === status;
+  if (status === 'offen') return true;
+  // Ohne Antrag: wie bisher, außer der Betrieb verlangt Anträge (dann nur ein älterer, unveränderter Eintrag).
+  return !urlaubsantragNoetig(db) || (gleich && !vorher.antrag);
+}
 function zeitErlaubt(a, m, db) {
   if (a.geloescht) return false;
   if (darfAlleZeiten(m)) return true;
@@ -149,7 +169,7 @@ function zeitErlaubt(a, m, db) {
   }
   const freigegeben = (monat) => !!gespeichert(`${m.id}_freigabe_${monat}`)?.freigegeben;
   const vorher = gespeichert(a.id);
-  return !freigegeben(monatDerZeit(z)) && !(vorher && freigegeben(monatDerZeit(vorher)));
+  return !freigegeben(monatDerZeit(z)) && !(vorher && freigegeben(monatDerZeit(vorher))) && urlaubErlaubt(z, vorher, db);
 }
 
 /** Lesen: Zeiten anderer nur mit dem Recht; das Verbandbuch (Gesundheitsdaten) nur der Verwalter, sonst die eigenen Einträge. */

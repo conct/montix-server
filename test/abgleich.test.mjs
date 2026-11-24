@@ -403,6 +403,40 @@ test('Zeiterfassung: Vertrag und Freigabe nur mit Recht, freigegebener Monat ges
   assert.ok((await zeiten(ma.token)).has(`${id}_vertrag`));
 });
 
+test('Zeiterfassung: Urlaubsantrag nie selbst genehmigen, mit Antragspflicht nur offen', async () => {
+  const chef = await geraet('Vroni', 'verwalter');
+  const ma = await geraet('Udo', 'mitarbeiter');
+  const id = ma.mitarbeiter.id;
+  const lesen = async () => {
+    const alles = [];
+    for (let seit = 0, mehr = true; mehr; ) {
+      const d = (await rufe(`/abgleich?seit=${seit}`, { token: chef.token })).daten;
+      alles.push(...d.aenderungen);
+      ({ mehr } = d);
+      seit = d.rev;
+    }
+    return new Map(alles.filter((a) => a.sammlung === 'zeiten' && a.inhalt?.mitarbeiter === id).map((a) => [a.id, a.inhalt]));
+  };
+  const u = (zid, inhalt, s = 1) => ({ sammlung: 'zeiten', id: `${id}_${zid}`, geaendert: t(s), inhalt: { mitarbeiter: id, art: 'urlaub', beginn: '2026-12-21', ende: '2026-12-23', ...inhalt } });
+  const firma = (an, s) => ({ sammlung: 'roh', id: 'firma', geaendert: t(s), inhalt: { daten: JSON.stringify({ party: { name: 'Test' }, urlaubsantrag: an }) } });
+  // Ohne Antragspflicht: Urlaub wie bisher; selbst genehmigt wird nie.
+  await rufe('/abgleich', { token: ma.token, body: { aenderungen: [u('frei', {}), u('selbst', { antrag: { status: 'genehmigt', von: 'Udo' } }), u('antrag', { antrag: { status: 'offen' } })] } });
+  let m = await lesen();
+  assert.ok(m.has(`${id}_frei`));
+  assert.ok(!m.has(`${id}_selbst`), 'nicht selbst genehmigen');
+  assert.equal(m.get(`${id}_antrag`).antrag.status, 'offen');
+  // Der Verwalter genehmigt; Udo darf den Zeitraum danach nicht still verschieben, nur als neuen Antrag.
+  await rufe('/abgleich', { token: chef.token, body: { aenderungen: [firma(true, 2), u('antrag', { antrag: { status: 'genehmigt', von: 'Vroni' } }, 3)] } });
+  await rufe('/abgleich', { token: ma.token, body: { aenderungen: [u('antrag', { ende: '2026-12-30', antrag: { status: 'genehmigt', von: 'Vroni' } }, 4), u('neu', {}, 4)] } });
+  m = await lesen();
+  assert.equal(m.get(`${id}_antrag`).ende, '2026-12-23', 'genehmigter Zeitraum bleibt');
+  assert.ok(!m.has(`${id}_neu`), 'mit Antragspflicht kein Urlaub ohne Antrag');
+  await rufe('/abgleich', { token: ma.token, body: { aenderungen: [u('antrag', { ende: '2026-12-30', antrag: { status: 'offen' } }, 5)] } });
+  m = await lesen();
+  assert.equal(m.get(`${id}_antrag`).antrag.status, 'offen', 'geänderter Zeitraum wird wieder Antrag');
+  await rufe('/abgleich', { token: chef.token, body: { aenderungen: [firma(false, 6)] } });
+});
+
 test('Alleinarbeit: Frist, Bestätigung, Fristalarm, Notruf, Kümmern, Ende', async () => {
   const ma = await geraet('Ali', 'mitarbeiter');
   const kollege = await geraet('Kim', 'mitarbeiter');
