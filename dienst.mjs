@@ -294,7 +294,7 @@ export function erstelleDienst(
     const ziele = tokensVon(db, alarmZiele(db, a.mitarbeiter));
     const titel = entwarnung ? `Entwarnung: ${a.name}` : `ALARM: ${a.name}`;
     const text = entwarnung ? 'Hat sich wieder gemeldet.' : a.grund === 'notruf' ? 'Notruf bei Alleinarbeit. Bitte sofort kümmern.' : 'Hat sich bei Alleinarbeit nicht gemeldet. Bitte sofort kümmern.';
-    void push(ziele.map((t) => pushNachricht(t, titel, text, !entwarnung, '/alleinarbeit')));
+    void push(ziele.map((t) => pushNachricht(t, titel, text, !entwarnung, '/alleinarbeit', entwarnung ? 'alleinarbeit' : 'alarm')));
   };
   const pruefeAlarme = () => {
     for (const b of speicher.alleBetriebe()) {
@@ -311,7 +311,7 @@ export function erstelleDienst(
     const wer = r.kunde ?? 'Der Kunde';
     const titel = r.status === 'bestaetigt' ? `Termin bestätigt: ${wer}` : `Termin passt nicht: ${wer}`;
     const text = `${r.titel}${r.antwort ? ` – „${r.antwort.slice(0, 120)}“` : ''}`;
-    void push(tokensVon(db, ziele).map((t) => pushNachricht(t, titel, text, false, `/calendar/${r.termin}`)));
+    void push(tokensVon(db, ziele).map((t) => pushNachricht(t, titel, text, false, `/calendar/${r.termin}`, 'termine')));
   };
   const privatZaehler = new Map();
   const fehlerZaehler = new Map();

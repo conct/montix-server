@@ -103,7 +103,7 @@ function alle(db, sammlung, kunde) {
 function pushAnBetrieb(db, push, portal, titel, nachricht) {
   if (!push) return;
   const ids = [portal.von, ...db.prepare("select id from mitarbeiter where rolle = 'verwalter' and aktiv = 1").all().map((z) => z.id)].filter(Boolean);
-  void push(tokensVon(db, [...new Set(ids)]).map((t) => pushNachricht(t, titel, nachricht, false, `/clients/${portal.kunde}`)));
+  void push(tokensVon(db, [...new Set(ids)]).map((t) => pushNachricht(t, titel, nachricht, false, `/clients/${portal.kunde}`, 'kunden')));
 }
 
 /**

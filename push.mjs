@@ -49,15 +49,19 @@ export function alarmZiele(db, person) {
     .map((z) => z.id);
 }
 
-/** url: Ziel in der App beim Antippen (z. B. /alleinarbeit). */
-export const nachricht = (to, title, body, alarm = false, url = alarm ? '/alleinarbeit' : '/nachrichten') => ({
+/**
+ * url: Ziel in der App beim Antippen (z. B. /alleinarbeit). kanal: Mitteilungskanal auf Android
+ * (src/features/push/kanaele.ts) — dort lässt er sich einzeln stumm schalten. Ältere Apps ohne diesen
+ * Kanal zeigen die Mitteilung im Sammelkanal von Android.
+ */
+export const nachricht = (to, title, body, alarm = false, url = alarm ? '/alleinarbeit' : '/nachrichten', kanal = alarm ? 'alarm' : 'nachrichten') => ({
   to,
   title,
   body,
   data: { url },
   sound: 'default',
   priority: 'high',
-  ...(alarm ? { channelId: 'alarm' } : {}),
+  channelId: kanal,
 });
 
 export function pushWeg(methode, pfad, wer, koerper, geraetHash) {

@@ -135,7 +135,7 @@ export function erstelleRaeume({ ordner, senden, push, zentral = false }) {
     if (!push) return;
     const ids = [raum.von, ...db.prepare("select id from mitarbeiter where rolle = 'verwalter' and aktiv = 1").all().map((z) => z.id)];
     const tokens = tokensVon(db, [...new Set(ids)]);
-    void push(tokens.map((t) => pushNachricht(t, titel, text, false, `/raeume/${raum.id}`)));
+    void push(tokens.map((t) => pushNachricht(t, titel, text, false, `/raeume/${raum.id}`, 'bereiche')));
   }
 
   /**
