@@ -172,6 +172,44 @@ function zeitErlaubt(a, m, db) {
   return !freigegeben(monatDerZeit(z)) && !(vorher && freigegeben(monatDerZeit(vorher))) && urlaubErlaubt(z, vorher, db);
 }
 
+/**
+ * Urlaubsanträge melden: Vor dem Schreiben den Stand der betroffenen Urlaubseinträge merken, danach
+ * vergleichen. Neu offen → Mitteilung an alle, die genehmigen dürfen; genehmigt oder abgelehnt →
+ * Mitteilung an den Antragsteller. Wer selbst geschrieben hat, bekommt nichts. Kanal „arbeitszeit“.
+ */
+const zeitLesen = (db, id) => {
+  const r = db.prepare("select inhalt from daten where sammlung = 'zeiten' and id = ? and geloescht = 0").get(id);
+  return r ? JSON.parse(r.inhalt) : null;
+};
+export function antragsStand(db, aenderungen) {
+  const stand = new Map();
+  for (const a of aenderungen) if (a.sammlung === 'zeiten' && !a.geloescht && a.inhalt?.art === 'urlaub') stand.set(a.id, zeitLesen(db, a.id)?.antrag?.status ?? null);
+  return stand;
+}
+const tagDe = (tag) => String(tag).split('-').reverse().join('.');
+export function antragsMitteilungen(db, vorher, autor) {
+  const nachrichten = [];
+  for (const [id, alt] of vorher) {
+    const z = zeitLesen(db, id);
+    const status = z?.antrag?.status;
+    if (!z || z.art !== 'urlaub' || z.storniert || !status || status === alt) continue;
+    const zeitraum = z.ende && z.ende !== z.beginn ? `${tagDe(z.beginn)}–${tagDe(z.ende)}` : tagDe(z.beginn);
+    if (status === 'offen') {
+      const ziele = db
+        .prepare("select id, rolle, bereiche from mitarbeiter where aktiv = 1 and rolle in ('verwalter', 'mitarbeiter')")
+        .all()
+        .filter((m) => darfAlleZeiten(m) && m.id !== autor && m.id !== z.mitarbeiter)
+        .map((m) => m.id);
+      if (ziele.length) nachrichten.push({ ziele, titel: `Urlaubsantrag: ${z.name ?? 'Mitarbeiter'}`, text: `${zeitraum}. Bitte genehmigen oder ablehnen.` });
+    } else if (z.mitarbeiter && z.mitarbeiter !== autor) {
+      const titel = status === 'genehmigt' ? 'Urlaub genehmigt' : 'Urlaub abgelehnt';
+      const text = `${zeitraum}${z.antrag.von ? ` – ${z.antrag.von}` : ''}${status === 'abgelehnt' && z.antrag.grund ? `: „${String(z.antrag.grund).slice(0, 120)}“` : ''}`;
+      nachrichten.push({ ziele: [z.mitarbeiter], titel, text });
+    }
+  }
+  return nachrichten;
+}
+
 /** Lesen: Zeiten anderer nur mit dem Recht; das Verbandbuch (Gesundheitsdaten) nur der Verwalter, sonst die eigenen Einträge. */
 export function zeitenFiltern(ergebnis, m) {
   const alleZeiten = darfAlleZeiten(m);
@@ -808,7 +846,13 @@ export function erstelleDienst(
         const { aenderungen } = await koerper(req);
         // Mit den Freigaben der Person (bereiche), für die Rechte der Warenwirtschaft.
         const person = { ...wer.mitarbeiter, bereiche: wer.roh?.bereiche ?? null };
-        return antwort(res, 200, speicher.schreiben(wer.db, wer.mitarbeiter.id, erlaubte(pruefeAenderungen(aenderungen), person, wer.db)));
+        const erlaubt = erlaubte(pruefeAenderungen(aenderungen), person, wer.db);
+        const antraege = antragsStand(wer.db, erlaubt);
+        const ergebnis = speicher.schreiben(wer.db, wer.mitarbeiter.id, erlaubt);
+        if (antraege.size)
+          for (const n of antragsMitteilungen(wer.db, antraege, wer.mitarbeiter.id))
+            void push(tokensVon(wer.db, n.ziele).map((t) => pushNachricht(t, n.titel, n.text, false, '/zeiten', 'arbeitszeit')));
+        return antwort(res, 200, ergebnis);
       }
 
       // Mitarbeiterausweis am geteilten Gerät: Karte → Person. Gesperrte Karten und Personen lehnt

@@ -419,14 +419,34 @@ test('Zeiterfassung: Urlaubsantrag nie selbst genehmigen, mit Antragspflicht nur
   };
   const u = (zid, inhalt, s = 1) => ({ sammlung: 'zeiten', id: `${id}_${zid}`, geaendert: t(s), inhalt: { mitarbeiter: id, art: 'urlaub', beginn: '2026-12-21', ende: '2026-12-23', ...inhalt } });
   const firma = (an, s) => ({ sammlung: 'roh', id: 'firma', geaendert: t(s), inhalt: { daten: JSON.stringify({ party: { name: 'Test' }, urlaubsantrag: an }) } });
+  const CHEF = 'ExponentPushToken[vroni12345678]';
+  const UDO = 'ExponentPushToken[udo1234567890]';
+  for (const [w, tk] of [[chef, CHEF], [ma, UDO]]) assert.equal((await rufe('/push/token', { token: w.token, body: { token: tk, plattform: 'android' } })).status, 200);
+  const an = (tk) => pushes.filter((p) => p.to === tk);
+  pushes.length = 0;
   // Ohne Antragspflicht: Urlaub wie bisher; selbst genehmigt wird nie.
-  await rufe('/abgleich', { token: ma.token, body: { aenderungen: [u('frei', {}), u('selbst', { antrag: { status: 'genehmigt', von: 'Udo' } }), u('antrag', { antrag: { status: 'offen' } })] } });
+  await rufe('/abgleich', { token: ma.token, body: { aenderungen: [u('frei', {}), u('selbst', { antrag: { status: 'genehmigt', von: 'Udo' } }), u('antrag', { antrag: { status: 'offen' }, name: 'Udo' })] } });
   let m = await lesen();
   assert.ok(m.has(`${id}_frei`));
   assert.ok(!m.has(`${id}_selbst`), 'nicht selbst genehmigen');
   assert.equal(m.get(`${id}_antrag`).antrag.status, 'offen');
+  // Neuer Antrag: Mitteilung an den Verwalter, nicht an Udo selbst.
+  assert.equal(an(CHEF).length, 1);
+  assert.equal(an(CHEF)[0].title, 'Urlaubsantrag: Udo');
+  assert.equal(an(CHEF)[0].body, '21.12.2026–23.12.2026. Bitte genehmigen oder ablehnen.');
+  assert.equal(an(CHEF)[0].channelId, 'arbeitszeit');
+  assert.equal(an(UDO).length, 0);
+  pushes.length = 0;
   // Der Verwalter genehmigt; Udo darf den Zeitraum danach nicht still verschieben, nur als neuen Antrag.
   await rufe('/abgleich', { token: chef.token, body: { aenderungen: [firma(true, 2), u('antrag', { antrag: { status: 'genehmigt', von: 'Vroni' } }, 3)] } });
+  assert.equal(an(UDO).length, 1);
+  assert.equal(an(UDO)[0].title, 'Urlaub genehmigt');
+  assert.equal(an(UDO)[0].body, '21.12.2026–23.12.2026 – Vroni');
+  assert.equal(an(CHEF).length, 0);
+  // Unverändert noch einmal geschickt: keine zweite Mitteilung.
+  pushes.length = 0;
+  await rufe('/abgleich', { token: chef.token, body: { aenderungen: [u('antrag', { antrag: { status: 'genehmigt', von: 'Vroni' } }, 3.5)] } });
+  assert.equal(pushes.length, 0);
   await rufe('/abgleich', { token: ma.token, body: { aenderungen: [u('antrag', { ende: '2026-12-30', antrag: { status: 'genehmigt', von: 'Vroni' } }, 4), u('neu', {}, 4)] } });
   m = await lesen();
   assert.equal(m.get(`${id}_antrag`).ende, '2026-12-23', 'genehmigter Zeitraum bleibt');
