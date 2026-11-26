@@ -219,6 +219,8 @@ export function zeitenFiltern(ergebnis, m) {
     aenderungen: ergebnis.aenderungen.filter((a) => {
       if (a.sammlung === 'zeiten') return alleZeiten || a.id.startsWith(`${m.id}_`);
       if (a.sammlung === 'verbandbuch') return m.rolle === 'verwalter' || a.id.startsWith(`${m.id}_`) || (!a.geloescht && a.inhalt?.person?.id === m.id);
+      // Eingangsrechnungen (Beträge, Bankverbindungen der Lieferanten) nur mit dem Recht „Einkauf“.
+      if (a.sammlung === 'eingangsrechnungen') return darfEinkauf(m);
       return true;
     }),
   };
@@ -251,6 +253,7 @@ export function erlaubte(liste, mitarbeiter, db) {
     if (a.sammlung === 'tourereignisse') return darfDispo(mitarbeiter) || eigeneMeldung();
     if (a.sammlung === 'lieferanten') return darfEinkauf(mitarbeiter);
     if (a.sammlung === 'bestellungen') return darfEinkauf(mitarbeiter) || darfLager(mitarbeiter);
+    if (a.sammlung === 'eingangsrechnungen') return darfEinkauf(mitarbeiter);
     // Firmendaten, Logo und Firmenfarben ändert nur ein Verwalter — sonst trüge ein Mitarbeiter einen
     // anderen Absender auf allen Geräten des Betriebs ein.
     if (a.sammlung === 'roh' && FIRMA_ROH.includes(a.id)) return mitarbeiter.rolle === 'verwalter';

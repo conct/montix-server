@@ -1338,6 +1338,26 @@ test('Einkauf: Lieferanten nur mit Recht „Einkauf“, Bestellungen auch mit �
   const ids = (s) => alle.filter((a) => a.sammlung === s).map((a) => a.id).sort();
   assert.deepEqual(ids('lieferanten'), ['L-chef', 'L-einkauf']);
   assert.deepEqual(ids('bestellungen'), ['B-chef', 'B-einkauf', 'B-lager', 'B-voll']);
+
+  // Eingangsrechnungen: schreiben und lesen nur mit „Einkauf“ (Beträge, Bankverbindungen der Lieferanten).
+  const rechnung = (id) => ({ sammlung: 'eingangsrechnungen', id, geaendert: t(2), inhalt: { id, nummer: id, absender: { name: 'Lieferant' }, positionen: [], createdAt: t(2), updatedAt: t(2) } });
+  for (const [wer, n] of [[chef, 'chef'], [lager, 'lager'], [einkauf, 'einkauf'], [ohne, 'ohne']]) {
+    assert.equal((await rufe('/abgleich', { token: wer.token, body: { aenderungen: [rechnung(`ER-${n}`)] } })).status, 200);
+  }
+  const gelesen = async (wer) => {
+    const liste = [];
+    for (let seit = 0, mehr = true; mehr; ) {
+      const d = (await rufe(`/abgleich?seit=${seit}`, { token: wer.token })).daten;
+      liste.push(...d.aenderungen.filter((a) => a.sammlung === 'eingangsrechnungen').map((a) => a.id));
+      ({ mehr } = d);
+      seit = d.rev;
+    }
+    return liste.sort();
+  };
+  assert.deepEqual(await gelesen(chef), ['ER-chef', 'ER-einkauf']);
+  assert.deepEqual(await gelesen(einkauf), ['ER-chef', 'ER-einkauf']);
+  assert.deepEqual(await gelesen(lager), []);
+  assert.deepEqual(await gelesen(ohne), []);
 });
 
 test('Kundenportal: Link je Kunde, Termine und Berichte aus dem Abgleich, Angebot annehmen, Nachricht, Widerruf', async () => {
